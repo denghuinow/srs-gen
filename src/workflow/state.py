@@ -18,5 +18,4 @@ class WorkflowState(TypedDict, total=False):
     ablation_mode: str
     convergence_reached: bool
     max_iterations: int
-    _atomic_requirements: List[str]  # 临时存储原子需求
     _srs_document: str  # 临时存储生成的SRS文档

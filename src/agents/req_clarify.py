@@ -50,7 +50,7 @@ class ReqClarifyAgent:
             prompt = f"""请对以下需求清单进行一致性评分，对照基准SRS文档。
 
 基准SRS文档：
-{baseline_srs[:2000]}...
+{baseline_srs}
 
 需求清单：
 {requirements_text}

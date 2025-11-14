@@ -1,4 +1,5 @@
 """文档生成智能体 (FR-004)"""
+from typing import Optional
 from openai import OpenAI
 from ..config import Config
 from ..models.requirement import RequirementList
@@ -14,11 +15,58 @@ class DocGenerateAgent:
         self.timer = timer_manager.get_timer("DocGenerate")
         self.template = SRSTemplate()
     
-    def generate(self, requirements: RequirementList, project_name: str = "项目") -> str:
-        """生成SRS文档"""
+    def generate(
+        self,
+        requirements: Optional[RequirementList] = None,
+        raw_input: Optional[str] = None,
+        project_name: str = "项目"
+    ) -> str:
+        """生成SRS文档
+        
+        Args:
+            requirements: 需求清单（用于正常模式）
+            raw_input: 原始输入（用于 no-explore-clarify 模式）
+            project_name: 项目名称
+        """
         self.timer.start()
         
         try:
+            # no-explore-clarify 模式：直接使用原始输入生成文档
+            if raw_input:
+                prompt = f"""基于以下原始需求，生成完整的IEEE 830标准SRS文档。
+
+原始需求：
+{raw_input}
+
+要求：
+1. 严格按照IEEE 830标准格式
+2. 基于提供的原始需求内容，提取和组织功能需求
+3. 将需求组织到功能模块中（如案件管理、消息交互、检索查询、权限管理、任务管理、数据管理、文件管理等）
+4. 每个功能模块先给出概述，再列出详细需求
+5. 确保文档结构完整、逻辑清晰
+6. 输出Markdown格式
+
+请生成完整的SRS文档。"""
+                
+                response = self.client.chat.completions.create(
+                    model=Config.OPENAI_MODEL,
+                    messages=[
+                        {"role": "system", "content": "你是一个专业的文档编写专家，擅长编写符合IEEE 830标准的SRS文档。"},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.0
+                )
+                
+                generated_doc = response.choices[0].message.content
+                if generated_doc:
+                    return generated_doc
+                
+                return "# SRS文档\n\n（生成失败）"
+            
+            # 正常模式：使用需求清单生成文档
+            if not requirements or not requirements.requirements:
+                return "# SRS文档\n\n（无需求清单）"
+            
             # 使用模板生成基础结构
             doc = self.template.generate(requirements.requirements, project_name)
             

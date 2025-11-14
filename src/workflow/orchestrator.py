@@ -5,7 +5,6 @@ from openai import OpenAI
 from ..config import Config, AblationMode
 from ..workflow.state import WorkflowState
 from ..models.requirement import RequirementList
-from ..agents.req_parse import ReqParseAgent
 from ..agents.req_explore import ReqExploreAgent
 from ..agents.req_clarify import ReqClarifyAgent
 from ..agents.doc_generate import DocGenerateAgent
@@ -27,20 +26,8 @@ class WorkflowOrchestrator:
         # 初始化智能体（计时器将在状态中共享）
         self.timer_manager = None  # 将在run中初始化
     
-    def _parse_node(self, state: WorkflowState) -> WorkflowState:
-        """解析节点"""
-        if self.timer_manager is None:
-            self.timer_manager = state["timer_manager"]
-        
-        agent = ReqParseAgent(self.client, self.timer_manager)
-        atomic_requirements = agent.parse(state["raw_input"])
-        
-        # 存储原子需求到状态（临时）
-        state["_atomic_requirements"] = atomic_requirements  # type: ignore
-        return state
-    
     def _explore_node(self, state: WorkflowState) -> WorkflowState:
-        """挖掘节点"""
+        """裂变挖掘节点"""
         # 检查是否是从clarify节点来的继续迭代
         # 如果requirements非空且至少有一个需求有评分，说明这是继续迭代，需要递增迭代号
         has_scored_requirements = any(
@@ -52,38 +39,38 @@ class WorkflowOrchestrator:
             state["iteration_count"] += 1
             self.logger.info(f"继续迭代，迭代号递增至: {state['iteration_count']}")
         
+        # no-explore-clarify 模式：直接设置收敛，返回空列表
+        if self.ablation_mode == "no-explore-clarify":
+            self.logger.info("no-explore-clarify 模式，跳过裂变挖掘")
+            state["convergence_reached"] = True
+            state["requirements"] = RequirementList()
+            return state
+        
         agent = ReqExploreAgent(self.client, state["timer_manager"])
-        atomic_requirements = state.get("_atomic_requirements", [])  # type: ignore
         
         # 记录挖掘前的需求ID集合
         req_ids_before = set(req.id for req in state["requirements"].requirements)
-        self.logger.debug(f"[迭代 {state['iteration_count']}] 挖掘前需求ID集合: {sorted(req_ids_before)}")
+        self.logger.debug(f"[深度 {state['iteration_count']}] 挖掘前需求ID集合: {sorted(req_ids_before)}")
         
-        if self.ablation_mode == "no-explore-clarify":
-            # 直接映射原子需求
-            state["requirements"] = agent.map_atomic_to_requirements(
-                atomic_requirements,
-                iteration=state["iteration_count"]
-            )
-        else:
-            # 正常挖掘
-            state["requirements"] = agent.explore(
-                atomic_requirements,
-                state["requirements"],
-                state["forbidden_list"],
-                state["iteration_count"]
-            )
+        # 调用裂变式挖掘
+        state["requirements"] = agent.explore(
+            raw_input=state["raw_input"],
+            existing_requirements=state["requirements"],
+            forbidden_list=state["forbidden_list"],
+            iteration=state["iteration_count"],
+            ablation_mode=self.ablation_mode
+        )
         
         # 记录挖掘后的需求ID集合
         req_ids_after = set(req.id for req in state["requirements"].requirements)
-        self.logger.debug(f"[迭代 {state['iteration_count']}] 挖掘后需求ID集合: {sorted(req_ids_after)}")
+        self.logger.debug(f"[深度 {state['iteration_count']}] 挖掘后需求ID集合: {sorted(req_ids_after)}")
         
         # 计算新增的需求
         new_req_ids = req_ids_after - req_ids_before
         if new_req_ids:
-            self.logger.info(f"[迭代 {state['iteration_count']}] 挖掘阶段新增需求: {sorted(new_req_ids)}")
+            self.logger.info(f"[深度 {state['iteration_count']}] 挖掘阶段新增需求: {sorted(new_req_ids)}")
         else:
-            self.logger.debug(f"[迭代 {state['iteration_count']}] 挖掘阶段无新增需求")
+            self.logger.debug(f"[深度 {state['iteration_count']}] 挖掘阶段无新增需求")
         
         return state
     
@@ -91,31 +78,49 @@ class WorkflowOrchestrator:
         """澄清节点"""
         # 记录澄清前的需求ID集合
         req_ids_before = set(req.id for req in state["requirements"].requirements)
-        self.logger.debug(f"[迭代 {state['iteration_count']}] 澄清前需求ID集合: {sorted(req_ids_before)}")
+        self.logger.debug(f"[深度 {state['iteration_count']}] 澄清前需求ID集合: {sorted(req_ids_before)}")
         
-        if self.ablation_mode in ["no-clarify", "no-explore-clarify"]:
-            # 跳过澄清，默认0分
-            self.logger.info(f"[迭代 {state['iteration_count']}] 消融模式，跳过澄清阶段")
+        if self.ablation_mode == "no-explore-clarify":
+            # no-explore-clarify 模式不会到达此节点
+            return state
+        
+        if self.ablation_mode == "no-clarify":
+            # no-clarify 模式：跳过澄清，默认0分，继续迭代
+            self.logger.info(f"[深度 {state['iteration_count']}] no-clarify 模式，跳过澄清阶段")
+            # 只对当前迭代新增的需求评分（通过 iteration 字段判断）
             for req in state["requirements"].requirements:
-                if req.score is None:
+                if req.score is None and req.iteration == state["iteration_count"]:
                     req.score = 0
                     state["score_history"].record(
                         req.id,
                         state["iteration_count"],
                         0,
-                        "消融模式：默认0分"
+                        "no-clarify 模式：默认0分"
                     )
-            # 在消融模式下，不进行负分过滤，所有需求都保留
             req_ids_after = set(req.id for req in state["requirements"].requirements)
-            self.logger.debug(f"[迭代 {state['iteration_count']}] 澄清后需求ID集合: {sorted(req_ids_after)}")
+            self.logger.debug(f"[深度 {state['iteration_count']}] 澄清后需求ID集合: {sorted(req_ids_after)}")
             return state
         
         agent = ReqClarifyAgent(self.client, state["timer_manager"])
-        results = agent.clarify(state["requirements"], state["baseline_srs"])
+        
+        # 只对当前迭代新增的需求进行评分（通过 iteration 字段判断）
+        current_iteration_reqs = [
+            req for req in state["requirements"].requirements
+            if req.iteration == state["iteration_count"]
+        ]
+        
+        if not current_iteration_reqs:
+            self.logger.info("当前迭代没有新增需求，跳过澄清")
+            return state
+        
+        # 创建临时 RequirementList 只包含当前迭代的需求
+        temp_requirements = RequirementList()
+        temp_requirements.requirements = current_iteration_reqs
+        
+        results = agent.clarify(temp_requirements, state["baseline_srs"])
         
         # 应用评分结果
         score_map = {r.req_id: r for r in results}
-        new_requirements = RequirementList()
         forbidden_req_ids = []
         
         for req in state["requirements"].requirements:
@@ -137,30 +142,20 @@ class WorkflowOrchestrator:
                 if result.score == -2:
                     state["forbidden_list"].add(req)
                     forbidden_req_ids.append(req.id)
-                
-                # 所有需求都保留（包括负分）
-                if not new_requirements.add(req):
-                    self.logger.warning(f"需求 {req.id} 在澄清阶段重复添加，已跳过")
-            else:
-                # 没有评分结果的需求保留（可能是新生成的）
-                if not new_requirements.add(req):
-                    self.logger.warning(f"需求 {req.id} 在澄清阶段重复添加，已跳过")
-        
-        state["requirements"] = new_requirements
         
         # 记录澄清后的需求ID集合
         req_ids_after = set(req.id for req in state["requirements"].requirements)
-        self.logger.debug(f"[迭代 {state['iteration_count']}] 澄清后需求ID集合: {sorted(req_ids_after)}")
+        self.logger.debug(f"[深度 {state['iteration_count']}] 澄清后需求ID集合: {sorted(req_ids_after)}")
         
         # 记录禁用清单的需求
         if forbidden_req_ids:
-            self.logger.info(f"[迭代 {state['iteration_count']}] 加入禁用清单的需求: {sorted(forbidden_req_ids)}")
+            self.logger.info(f"[深度 {state['iteration_count']}] 加入禁用清单的需求: {sorted(forbidden_req_ids)}")
         
         # 统计负分需求数量（用于日志）
         negative_count = sum(1 for req in state["requirements"].requirements 
                            if req.score is not None and req.score < 0)
         if negative_count > 0:
-            self.logger.info(f"[迭代 {state['iteration_count']}] 保留负分需求数量: {negative_count}（将在下一轮迭代中改进）")
+            self.logger.info(f"[深度 {state['iteration_count']}] 保留负分需求数量: {negative_count}（将在下一轮迭代中改进）")
         
         return state
     
@@ -170,16 +165,27 @@ class WorkflowOrchestrator:
         req_count = len(state["requirements"].requirements)
         
         # 计算当前迭代的需求变化（需要从状态中获取，这里简化处理）
-        self.logger.info(f"[迭代 {iteration}] 迭代总结:")
+        self.logger.info(f"[深度 {iteration}] 迭代总结:")
         self.logger.info(f"  当前需求总数: {req_count}")
         
-        # no-explore-clarify模式：第一次迭代后直接生成
+        # no-explore-clarify模式：已在 explore 节点处理，不会到达这里
         if self.ablation_mode == "no-explore-clarify":
             state["convergence_reached"] = True
-            self.logger.info(f"[迭代 {iteration}] 收敛判断: no-explore-clarify模式，直接生成")
+            self.logger.info(f"[深度 {iteration}] 收敛判断: no-explore-clarify模式，直接生成")
             return "generate"
         
-        # 检查是否有负分条目（用于日志记录）
+        # no-clarify模式：继续迭代到最大次数（因为没有评分约束，无法提前收敛）
+        if self.ablation_mode == "no-clarify":
+            max_iterations = state.get("max_iterations", Config.MAX_ITERATIONS)  # type: ignore
+            if state["iteration_count"] >= max_iterations:
+                state["convergence_reached"] = True
+                self.logger.info(f"[深度 {iteration}] 收敛判断: no-clarify模式，达到最大迭代次数 ({max_iterations})")
+                return "generate"
+            next_iteration = iteration + 1
+            self.logger.info(f"[深度 {iteration}] 收敛判断: no-clarify模式，继续迭代 -> 深度 {next_iteration}")
+            return "continue"
+        
+        # default模式：检查是否有负分条目（用于日志记录）
         has_negative = any(
             req.score is not None and req.score < 0
             for req in state["requirements"].requirements
@@ -189,21 +195,28 @@ class WorkflowOrchestrator:
         max_iterations = state.get("max_iterations", Config.MAX_ITERATIONS)  # type: ignore
         if state["iteration_count"] >= max_iterations:
             state["convergence_reached"] = True
-            self.logger.info(f"[迭代 {iteration}] 收敛判断: 达到最大迭代次数 ({max_iterations})")
+            self.logger.info(f"[深度 {iteration}] 收敛判断: 达到最大迭代次数 ({max_iterations})")
             return "generate"
         
         # 继续迭代（迭代号递增将在_explore_node中执行）
         # 强制迭代到最大次数，不因无负分条目而提前收敛
         next_iteration = iteration + 1
         negative_info = "存在负分条目" if has_negative else "无负分条目"
-        self.logger.info(f"[迭代 {iteration}] 收敛判断: {negative_info}，继续迭代 -> 迭代 {next_iteration}（强制迭代到最大次数 {max_iterations}）")
+        self.logger.info(f"[深度 {iteration}] 收敛判断: {negative_info}，继续迭代 -> 深度 {next_iteration}（强制迭代到最大次数 {max_iterations}）")
         return "continue"
     
     def _generate_node(self, state: WorkflowState) -> WorkflowState:
         """生成节点"""
         agent = DocGenerateAgent(self.client, state["timer_manager"])
         
-        # 只传递评分>=1的需求给文档生成器
+        # no-explore-clarify 模式：直接使用原始输入生成文档
+        if self.ablation_mode == "no-explore-clarify":
+            self.logger.info("no-explore-clarify 模式，直接使用原始输入生成文档")
+            srs_doc = agent.generate(raw_input=state["raw_input"])
+            state["_srs_document"] = srs_doc  # type: ignore
+            return state
+        
+        # 其他模式：只传递评分>=1的需求给文档生成器
         filtered_requirements = state["requirements"].filter_by_score(min_score=1)
         
         # 记录过滤信息
@@ -218,7 +231,7 @@ class WorkflowOrchestrator:
             if excluded_ids:
                 self.logger.debug(f"被排除的需求ID: {sorted(excluded_ids)}")
         
-        srs_doc = agent.generate(filtered_requirements)
+        srs_doc = agent.generate(requirements=filtered_requirements)
         state["_srs_document"] = srs_doc  # type: ignore
         return state
     
@@ -226,17 +239,15 @@ class WorkflowOrchestrator:
         """构建工作流图"""
         workflow = StateGraph(WorkflowState)
         
-        # 添加节点
-        workflow.add_node("parse", self._parse_node)
+        # 添加节点（移除 parse 节点）
         workflow.add_node("explore", self._explore_node)
         workflow.add_node("clarify", self._clarify_node)
         workflow.add_node("generate", self._generate_node)
         
-        # 设置入口
-        workflow.set_entry_point("parse")
+        # 设置入口（从 explore 开始）
+        workflow.set_entry_point("explore")
         
         # 添加边
-        workflow.add_edge("parse", "explore")
         workflow.add_edge("explore", "clarify")
         workflow.add_conditional_edges(
             "clarify",
