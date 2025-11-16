@@ -7,6 +7,7 @@ from ..models.requirement import Requirement, RequirementList, ClarificationResu
 from ..utils.timer import TimerManager
 from ..utils.forbidden_list import ForbiddenList
 from ..utils.logger import get_logger
+from ..utils.continuation import continue_on_truncation
 
 
 class ReqClarifyAgent:
@@ -69,11 +70,22 @@ class ReqClarifyAgent:
 
 请逐条评分。"""
             
-            # 记录API调用参数
+            # 构建API调用参数
             api_params = {
                 "model": Config.OPENAI_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": prompt}
+                ],
                 "temperature": 0.0
             }
+            
+            # 如果配置了MAX_TOKENS，使用配置值
+            max_tokens = Config.get_max_tokens()
+            if max_tokens is not None:
+                api_params["max_tokens"] = max_tokens
+            
+            # 记录API调用参数
             self.logger.debug(f"API调用参数: {api_params}")
             
             # 记录完整请求内容
@@ -81,17 +93,22 @@ class ReqClarifyAgent:
             self.logger.debug(f"  System: {system_message}")
             self.logger.debug(f"  User: {prompt}")
             
-            response = self.client.chat.completions.create(
-                model=Config.OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": system_message},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.0
+            response = self.client.chat.completions.create(**api_params)
+            
+            # 获取初始响应内容
+            content = response.choices[0].message.content or ""
+            finish_reason = response.choices[0].finish_reason
+            
+            # 如果因max_tokens截断，自动续接
+            content, finish_reason = continue_on_truncation(
+                self.client,
+                api_params,
+                content,
+                finish_reason,
+                task_name="需求澄清"
             )
             
             # 记录完整响应内容
-            content = response.choices[0].message.content
             if not content:
                 self.logger.warning("API响应为空")
                 return []
@@ -99,11 +116,6 @@ class ReqClarifyAgent:
             self.logger.debug("完整响应内容:")
             for line in content.split("\n"):
                 self.logger.debug(f"  {line}")
-            
-            # 记录Token使用情况（如果可用）
-            if hasattr(response, 'usage') and response.usage:
-                usage = response.usage
-                self.logger.debug(f"Token使用情况: prompt_tokens={usage.prompt_tokens}, completion_tokens={usage.completion_tokens}, total_tokens={usage.total_tokens}")
             
             # 解析输出
             score_distribution = {2: 0, 1: 0, 0: 0, -1: 0, -2: 0}

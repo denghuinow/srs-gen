@@ -30,6 +30,7 @@ cp .env.example .env
 # OPENAI_MODEL=gpt-4o-mini  # 可选，默认为 gpt-4o-mini
 # MAX_ITERATIONS=5  # 可选，默认为 5
 # MAX_TOKENS=16000  # 可选，文档生成时的最大输出token数，未设置则使用API默认值
+# MAX_CONTINUATIONS=2  # 可选，当因max_tokens导致输出被截断时自动请求接续的次数上限，默认为 2
 # ABLATION_MODE=default  # 可选：default, no-clarify, no-explore-clarify
 ```
 
@@ -40,6 +41,7 @@ export OPENAI_BASE_URL="https://api.openai.com/v1"  # 可选
 export OPENAI_MODEL="gpt-4o-mini"  # 可选，默认为 gpt-4o-mini
 export MAX_ITERATIONS="5"  # 可选，默认为 5
 export MAX_TOKENS="16000"  # 可选，文档生成时的最大输出token数，未设置则使用API默认值
+export MAX_CONTINUATIONS="2"  # 可选，当因max_tokens导致输出被截断时自动请求接续的次数上限，默认为 2
 export ABLATION_MODE="default"  # 可选：default, no-clarify, no-explore-clarify
 ```
 

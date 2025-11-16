@@ -47,9 +47,9 @@ class RequirementList(BaseModel):
         return f"REQ-{next_num:03d}"
     
     def get_for_explore(self) -> List[dict]:
-        """获取用于ReqExplore的需求列表（仅包含id和score，不包含reason）"""
+        """获取用于ReqExplore的需求列表（包含id、score和text，不包含reason）"""
         return [
-            {"id": req.id, "score": req.score}
+            {"id": req.id, "score": req.score, "text": req.text}
             for req in self.requirements
             if req.score is not None
         ]

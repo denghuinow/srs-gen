@@ -8,6 +8,7 @@ from ..models.requirement import RequirementList
 from ..models.srs_template import SRSTemplate
 from ..utils.timer import TimerManager
 from ..utils.logger import get_logger
+from ..utils.continuation import continue_on_truncation
 
 
 class DocGenerateAgent:
@@ -103,9 +104,8 @@ Ensure the document follows professional SRS standards with proper sections, for
                 self.logger.info("开始流式生成SRS文档...")
 
             generated_parts = []
-            continue_instruction = "请继续完成上文未完的内容，保持相同的章节结构并直接衔接。"
             auto_continue_attempts = 0
-            max_auto_continue = 5
+            max_auto_continue = Config.MAX_CONTINUATIONS
 
             while True:
                 api_params = dict(base_api_params)
@@ -125,18 +125,35 @@ Ensure the document follows professional SRS standards with proper sections, for
                 if content:
                     generated_parts.append(content)
 
+                # 对于非流式响应，使用统一的续接工具函数
+                if not current_stream and finish_reason == "length":
+                    accumulated_text = "".join(generated_parts)
+                    content, finish_reason = continue_on_truncation(
+                        self.client,
+                        api_params,
+                        accumulated_text,
+                        finish_reason,
+                        task_name="文档生成"
+                    )
+                    generated_parts = [content]
+                    if finish_reason != "length":
+                        break
+                    # 如果续接后仍然被截断，继续循环（但已经使用了续接次数）
+                    continue
+
                 if finish_reason != "length":
                     break
 
+                # 流式响应的续接逻辑（保持原有逻辑）
                 auto_continue_attempts += 1
                 if auto_continue_attempts >= max_auto_continue:
-                    self.logger.warning("检测到连续截断且达到自动续接次数上限，停止继续请求。")
+                    self.logger.warning(f"检测到连续截断且达到自动续接次数上限（{max_auto_continue}），停止继续请求。")
                     break
 
-                self.logger.info("检测到输出因达到最大token限制被截断，自动续接...")
+                self.logger.info(f"检测到输出因达到最大token限制被截断，自动续接（{auto_continue_attempts}/{max_auto_continue}）...")
                 if content:
                     messages.append({"role": "assistant", "content": content})
-                messages.append({"role": "user", "content": continue_instruction})
+                messages.append({"role": "user", "content": "请继续完成上文未完的内容，保持相同的章节结构并直接衔接。"})
 
             generated_doc = "".join(generated_parts)
             if generated_doc:

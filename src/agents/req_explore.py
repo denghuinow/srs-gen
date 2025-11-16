@@ -6,6 +6,7 @@ from ..models.requirement import Requirement, RequirementList
 from ..utils.timer import TimerManager
 from ..utils.forbidden_list import ForbiddenList
 from ..utils.logger import get_logger
+from ..utils.continuation import continue_on_truncation
 
 
 class ReqExploreAgent:
@@ -67,7 +68,7 @@ class ReqExploreAgent:
             self.logger.info(f"需求结构长度: {len(requirement_structure)} 字符")
             self.logger.debug(f"需求结构预览: {requirement_structure[:300]}..." if len(requirement_structure) > 300 else f"需求结构: {requirement_structure}")
             
-            # 获取用于探索的现有需求（仅id和score，不包含reason - FR-013）
+            # 获取用于探索的现有需求（包含id、score和text，不包含reason - FR-013）
             existing_for_explore = existing_requirements.get_for_explore()
             
             existing_ids_before = set(req.id for req in existing_requirements.requirements)
@@ -75,7 +76,8 @@ class ReqExploreAgent:
             if existing_for_explore:
                 self.logger.debug("现有需求及其评分:")
                 for req_info in existing_for_explore:
-                    self.logger.debug(f"  {req_info['id']}: 评分 {req_info['score']}")
+                    req_text_preview = req_info.get('text', '')[:100] + "..." if len(req_info.get('text', '')) > 100 else req_info.get('text', '')
+                    self.logger.debug(f"  {req_info['id']}: 评分 {req_info['score']} | 内容预览: {req_text_preview}")
             
             if forbidden_list.forbidden_ids:
                 self.logger.info(f"禁用需求ID数量: {len(forbidden_list.forbidden_ids)}")
@@ -99,7 +101,11 @@ class ReqExploreAgent:
                     score_desc = ""
                     if req_info['score'] < 1:
                         score_desc = " ⚠️需要改进"
+                    # 包含需求文本内容，避免模型失忆
+                    req_text = req_info.get('text', '')
                     existing_context += f"- {req_info['id']}: 评分 {req_info['score']}{score_desc}\n"
+                    if req_text:
+                        existing_context += f"  需求内容: {req_text}\n"
             
             forbidden_context = ""
             if forbidden_list.forbidden_ids:
@@ -191,11 +197,22 @@ class ReqExploreAgent:
 - **新增的补充需求**（使用新ID，从 {next_id} 开始，至少 {new_req_count} 个）
 每个需求都要包含上述详细说明。"""
             
-            # 记录API调用参数
+            # 构建API调用参数
             api_params = {
                 "model": Config.OPENAI_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": prompt}
+                ],
                 "temperature": 0.7
             }
+            
+            # 如果配置了MAX_TOKENS，使用配置值
+            max_tokens = Config.get_max_tokens()
+            if max_tokens is not None:
+                api_params["max_tokens"] = max_tokens
+            
+            # 记录API调用参数
             self.logger.debug(f"API调用参数: {api_params}")
             
             # 记录完整请求内容
@@ -203,17 +220,22 @@ class ReqExploreAgent:
             self.logger.debug(f"  System: {system_message}")
             self.logger.debug(f"  User: {prompt}")
             
-            response = self.client.chat.completions.create(
-                model=Config.OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": system_message},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7
+            response = self.client.chat.completions.create(**api_params)
+            
+            # 获取初始响应内容
+            content = response.choices[0].message.content or ""
+            finish_reason = response.choices[0].finish_reason
+            
+            # 如果因max_tokens截断，自动续接
+            content, finish_reason = continue_on_truncation(
+                self.client,
+                api_params,
+                content,
+                finish_reason,
+                task_name="需求挖掘"
             )
             
             # 记录完整响应内容
-            content = response.choices[0].message.content
             if not content:
                 self.logger.warning("API响应为空，返回现有需求")
                 return existing_requirements
@@ -221,11 +243,6 @@ class ReqExploreAgent:
             self.logger.debug("完整响应内容:")
             for line in content.split("\n"):
                 self.logger.debug(f"  {line}")
-            
-            # 记录Token使用情况（如果可用）
-            if hasattr(response, 'usage') and response.usage:
-                usage = response.usage
-                self.logger.debug(f"Token使用情况: prompt_tokens={usage.prompt_tokens}, completion_tokens={usage.completion_tokens}, total_tokens={usage.total_tokens}")
             
             # 解析输出（支持多行需求描述）
             new_requirements = RequirementList()

@@ -34,6 +34,9 @@ class Config:
     # 消融模式
     ABLATION_MODE: AblationMode = os.getenv("ABLATION_MODE", "default")  # type: ignore
     
+    # 续接配置
+    MAX_CONTINUATIONS: int = int(os.getenv("MAX_CONTINUATIONS", "2"))  # 当因max_tokens导致输出被截断时自动请求接续的次数上限
+    
     @classmethod
     def get_max_tokens(cls) -> Optional[int]:
         """获取MAX_TOKENS配置值"""
