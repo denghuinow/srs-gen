@@ -44,6 +44,8 @@ class ComparisonReporter:
                 report += f"- 迭代{record['iteration']}: 得分 {record['score']}"
                 if record['reason']:
                     report += f" - {record['reason']}"
+                if record.get("evidence"):
+                    report += f" | 证据: {record['evidence']}"
                 report += "\n"
             report += "\n"
         

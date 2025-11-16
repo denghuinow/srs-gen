@@ -1,10 +1,11 @@
 """工作流编排 (FR-005, FR-006)"""
-from typing import Literal, Optional
+import re
+from typing import Literal, Optional, List
 from langgraph.graph import StateGraph, END
 from openai import OpenAI
 from ..config import Config, AblationMode
 from ..workflow.state import WorkflowState
-from ..models.requirement import RequirementList
+from ..models.requirement import RequirementList, Requirement
 from ..agents.req_parse import ReqParseAgent
 from ..agents.req_explore import ReqExploreAgent
 from ..agents.req_clarify import ReqClarifyAgent
@@ -42,37 +43,32 @@ class WorkflowOrchestrator:
     def _explore_node(self, state: WorkflowState) -> WorkflowState:
         """挖掘节点"""
         # 检查是否是从clarify节点来的继续迭代
-        # 如果requirements非空且至少有一个需求有评分，说明这是继续迭代，需要递增迭代号
         has_scored_requirements = any(
-            req.score is not None 
+            req.score is not None
             for req in state["requirements"].requirements
         )
         if has_scored_requirements:
-            # 这是继续迭代，递增迭代号
             state["iteration_count"] += 1
             self.logger.info(f"继续迭代，迭代号递增至: {state['iteration_count']}")
-        
-        agent = ReqExploreAgent(self.client, state["timer_manager"])
+
         requirement_structure = state.get("requirement_structure", "")  # type: ignore
         raw_input = state["raw_input"]
-        
+
         # 记录挖掘前的需求ID集合
         req_ids_before = set(req.id for req in state["requirements"].requirements)
         self.logger.debug(f"[迭代 {state['iteration_count']}] 挖掘前需求ID集合: {sorted(req_ids_before)}")
-        
+
         if self.ablation_mode == "no-explore-clarify":
-            # no-explore-clarify 模式：基于需求结构直接生成基础需求（简化版探索）
-            self.logger.info(f"[迭代 {state['iteration_count']}] no-explore-clarify 模式：基于需求结构生成基础需求")
-            # 使用简化的探索逻辑，只生成基础需求
-            state["requirements"] = agent.explore(
+            self.logger.info(
+                f"[迭代 {state['iteration_count']}] no-explore-clarify 模式：跳过 ReqExplore，直接映射需求结构"
+            )
+            state["requirements"] = self._build_requirements_from_structure(
                 requirement_structure,
                 raw_input,
-                state["requirements"],
-                state["forbidden_list"],
                 state["iteration_count"]
             )
         else:
-            # 正常挖掘
+            agent = ReqExploreAgent(self.client, state["timer_manager"])
             state["requirements"] = agent.explore(
                 requirement_structure,
                 raw_input,
@@ -93,6 +89,99 @@ class WorkflowOrchestrator:
             self.logger.debug(f"[迭代 {state['iteration_count']}] 挖掘阶段无新增需求")
         
         return state
+
+    def _build_requirements_from_structure(
+        self,
+        requirement_structure: str,
+        raw_input: str,
+        iteration: int,
+    ) -> RequirementList:
+        """将需求结构直接转换为基础需求列表（no-explore-clarify模式专用）"""
+        requirement_texts = self._extract_list_entries(requirement_structure)
+
+        if not requirement_texts:
+            self.logger.warning(
+                "no-explore-clarify: 需求结构未识别出条目，退回原始输入做切分"
+            )
+            requirement_texts = self._fallback_requirements_from_raw_input(raw_input)
+
+        req_list = RequirementList()
+        for index, text in enumerate(requirement_texts, start=1):
+            req = Requirement(
+                id=f"REQ-{index:03d}",
+                text=text,
+                iteration=iteration,
+            )
+            req_list.add(req)
+
+        self.logger.info(
+            f"no-explore-clarify: 由需求结构生成 {len(req_list.requirements)} 条原子需求"
+        )
+        return req_list
+
+    def _extract_list_entries(self, requirement_structure: str) -> List[str]:
+        """从需求结构Markdown中提取列表项并附带上下文标题"""
+        entries: List[str] = []
+        seen = set()
+        heading_stack: list[str] = []
+
+        for raw_line in requirement_structure.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            if line.startswith("#"):
+                level = len(line) - len(line.lstrip("#"))
+                title = line[level:].strip(" -\t")
+                if not title:
+                    continue
+                while len(heading_stack) >= level:
+                    heading_stack.pop()
+                heading_stack.append(title)
+                continue
+
+            content = self._parse_list_item(line)
+            if not content:
+                continue
+
+            context = " / ".join(heading_stack).strip()
+            text = f"{context}: {content}" if context else content
+            normalized = text.strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                entries.append(normalized)
+
+        return entries
+
+    def _parse_list_item(self, line: str) -> Optional[str]:
+        """识别Markdown列表项内容（支持有序/无序/任务列表）"""
+        checkbox_match = re.match(r"^[-*+]\s*\[[xX ]\]\s*(.+)$", line)
+        if checkbox_match:
+            return checkbox_match.group(1).strip()
+
+        bullet_match = re.match(r"^[-*+]\s+(.+)$", line)
+        if bullet_match:
+            return bullet_match.group(1).strip()
+
+        ordered_match = re.match(r"^\d+[\.)]\s+(.+)$", line)
+        if ordered_match:
+            return ordered_match.group(1).strip()
+
+        return None
+
+    def _fallback_requirements_from_raw_input(self, raw_input: str) -> List[str]:
+        """当结构化文本为空时，退回原始输入拆分句子，保证至少有需求输出"""
+        candidates = []
+        for chunk in re.split(r"[\n\r]+", raw_input):
+            cleaned = chunk.strip(" -•\t")
+            if len(cleaned) >= 8:
+                candidates.append(cleaned)
+
+        if not candidates and raw_input:
+            sentences = re.split(r"[。！？!?.]", raw_input)
+            candidates = [s.strip() for s in sentences if len(s.strip()) >= 8]
+
+        return candidates
     
     def _clarify_node(self, state: WorkflowState) -> WorkflowState:
         """澄清节点"""
@@ -130,13 +219,15 @@ class WorkflowOrchestrator:
                 result = score_map[req.id]
                 req.score = result.score
                 req.reason = result.reason
+                req.evidence = result.evidence
                 
                 # 记录得分历史
                 state["score_history"].record(
                     req.id,
                     state["iteration_count"],
                     result.score,
-                    result.reason
+                    result.reason,
+                    result.evidence
                 )
                 
                 # 只有-2条目加入禁用清单，但不移除
@@ -215,8 +306,8 @@ class WorkflowOrchestrator:
         excluded_ids = []
         
         for req in state["requirements"].requirements:
-            # 检查历史得分是否>=1
-            if state["score_history"].has_score_above_or_equal(req.id, min_score=1):
+            best_score = state["score_history"].get_best_score(req.id)
+            if best_score is None or best_score >= 0:
                 filtered_requirements.requirements.append(req)
             else:
                 excluded_ids.append(req.id)
@@ -225,11 +316,20 @@ class WorkflowOrchestrator:
         total_count = len(state["requirements"].requirements)
         filtered_count = len(filtered_requirements.requirements)
         if total_count != filtered_count:
-            self.logger.info(f"文档生成：从 {total_count} 个需求中筛选出 {filtered_count} 个历史得分>=1的需求")
+            self.logger.info(f"文档生成：从 {total_count} 个需求中筛选出 {filtered_count} 个历史得分>=0的需求")
             if excluded_ids:
                 self.logger.debug(f"被排除的需求ID: {sorted(excluded_ids)}")
         
-        srs_doc = agent.generate(filtered_requirements)
+        # 获取需求结构（用于no-explore-clarify模式）
+        requirement_structure = state.get("requirement_structure", "")  # type: ignore
+        ablation_mode = state.get("ablation_mode", "default")  # type: ignore
+        
+        srs_doc = agent.generate(
+            filtered_requirements,
+            raw_input=state["raw_input"],
+            requirement_structure=requirement_structure,
+            ablation_mode=ablation_mode
+        )
         state["_srs_document"] = srs_doc  # type: ignore
         return state
     

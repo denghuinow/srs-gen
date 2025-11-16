@@ -1,4 +1,5 @@
 """需求挖掘智能体 (FR-002)"""
+from typing import List
 from openai import OpenAI
 from ..config import Config
 from ..models.requirement import Requirement, RequirementList
@@ -14,6 +15,41 @@ class ReqExploreAgent:
         self.client = client
         self.timer = timer_manager.get_timer("ReqExplore")
         self.logger = get_logger("ReqExplore")
+    
+    def _extract_branches(self, requirement_structure: str) -> List[str]:
+        """从需求结构中提取主要分支（基于标题或一级列表）"""
+        branches: List[str] = []
+        seen = set()
+        
+        for line in requirement_structure.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("##"):
+                title = stripped.lstrip("#").strip(" -\t")
+                if title and title not in seen:
+                    seen.add(title)
+                    branches.append(title)
+        
+        if not branches:
+            for line in requirement_structure.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("- "):
+                    title = stripped[2:].strip()
+                    if title and title not in seen:
+                        seen.add(title)
+                        branches.append(title)
+        
+        return branches
+    
+    def _build_branch_requirements(self, branches: List[str]) -> str:
+        """构建分支覆盖要求描述"""
+        if not branches:
+            return ""
+        lines = ["\n**结构分支覆盖要求：**"]
+        for branch in branches:
+            lines.append(
+                f"- {branch}: 本轮至少补充 {Config.MIN_REQUIREMENTS_PER_BRANCH} 条新需求，若该分支缺失需优先补齐"
+            )
+        return "\n".join(lines) + "\n"
     
     def explore(
         self,
@@ -51,6 +87,9 @@ class ReqExploreAgent:
             
             # 统计需要改进的需求（评分<1）
             needs_improvement = [req_info for req_info in existing_for_explore if req_info['score'] < 1]
+            
+            branches = self._extract_branches(requirement_structure)
+            branch_context = self._build_branch_requirements(branches)
             
             # 构建提示词
             existing_context = ""
@@ -97,6 +136,7 @@ class ReqExploreAgent:
 - 对于评分≥1的现有需求，可以保持不变或轻微优化，保持使用原ID
 - **本次迭代必须至少生成 {new_req_count} 个新的补充需求**（使用新ID，从 {next_id} 开始）
 - 新需求应该基于需求结构中的各个分支和节点进行深入挖掘
+{branch_context}
 
 要求：
 1. 使用业务语言表述
@@ -131,7 +171,7 @@ class ReqExploreAgent:
      * 哪些功能需要协同工作？
    
    **挖掘要求：**
-   - 必须从需求结构的每个主要分支中至少挖掘出2-3个相关需求
+   - 必须确保需求结构的每个主要分支均有至少 {Config.MIN_REQUIREMENTS_PER_BRANCH} 条本轮新增或改进需求
    - 必须覆盖异常处理、权限控制、数据验证等关键隐含需求
    - 必须确保至少生成 {new_req_count} 个新的补充需求，不得少于 {new_req_count} 个
    - 新需求应该具体、可执行、可验证，避免过于抽象或重复

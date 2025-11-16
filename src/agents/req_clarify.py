@@ -1,4 +1,5 @@
 """需求澄清智能体 (FR-003)"""
+import re
 from typing import List
 from openai import OpenAI
 from ..config import Config
@@ -49,8 +50,8 @@ class ReqClarifyAgent:
             system_message = "你是一个专业的需求评审专家，擅长评估需求与基准文档的一致性。"
             prompt = f"""请对以下需求清单进行一致性评分，对照基准SRS文档。
 
-基准SRS文档：
-{baseline_srs[:2000]}...
+基准SRS文档（完整）：
+{baseline_srs}
 
 需求清单：
 {requirements_text}
@@ -63,7 +64,8 @@ class ReqClarifyAgent:
    - -1: 与基准SRS存在轻微冲突
    - -2: 与基准SRS明确冲突，必须禁用
 2. 提供不超过60字的评分理由
-3. 输出格式：每行一个结果，格式为 "REQ-XXX: 评分 理由"
+3. 为每条需求提供不超过80字的证据引用，可包含章节标题、原文摘录或页码提示
+4. 输出格式：每行一个结果，格式为 "REQ-XXX | 评分: <score> | 理由: <text> | 证据: <evidence>"
 
 请逐条评分。"""
             
@@ -111,48 +113,46 @@ class ReqClarifyAgent:
                 if not line or line.startswith("#"):
                     continue
                 
-                # 解析格式 "REQ-XXX: 评分 理由"
-                if ":" in line:
-                    parts = line.split(":", 1)
-                    req_id = parts[0].strip()
-                    rest = parts[1].strip()
-                    
-                    # 提取评分和理由
-                    score = None
-                    reason = rest
-                    
-                    # 尝试提取评分数字
-                    for score_val in [2, 1, 0, -1, -2]:
-                        if f"评分 {score_val}" in rest or f"得分 {score_val}" in rest or f"{score_val}分" in rest:
-                            score = score_val
-                            # 移除评分部分，保留理由
-                            reason = rest.replace(f"评分 {score_val}", "").replace(f"得分 {score_val}", "").replace(f"{score_val}分", "").strip()
-                            break
-                    
-                    if score is None:
-                        # 如果没有明确评分，尝试从文本中推断
-                        if "+2" in rest or "高度一致" in rest:
-                            score = 2
-                        elif "+1" in rest or "基本一致" in rest:
-                            score = 1
-                        elif "-1" in rest or "轻微冲突" in rest:
-                            score = -1
-                        elif "-2" in rest or "明确冲突" in rest or "必须禁用" in rest:
-                            score = -2
-                        else:
-                            score = 0
-                    
-                    # 限制理由长度
-                    if len(reason) > 60:
-                        reason = reason[:57] + "..."
-                    
-                    score_distribution[score] = score_distribution.get(score, 0) + 1
-                    
-                    results.append(ClarificationResult(
-                        req_id=req_id,
-                        score=score,
-                        reason=reason
-                    ))
+                if "|" not in line:
+                    continue
+                
+                parts = [part.strip() for part in line.split("|")]
+                req_part = parts[0]
+                if ":" in req_part:
+                    req_part = req_part.split(":", 1)[0].strip()
+                req_id = req_part.replace("**", "").replace("*", "").strip()
+                if not req_id.startswith("REQ-"):
+                    continue
+                
+                score_val = None
+                reason = ""
+                evidence = ""
+                
+                for part in parts[1:]:
+                    normalized = part.replace("：", ":").strip()
+                    lower = normalized.lower()
+                    if lower.startswith("评分"):
+                        match = re.search(r"[-+]?\d+", normalized)
+                        if match:
+                            score_val = int(match.group())
+                    elif lower.startswith("理由"):
+                        reason_text = normalized.split(":", 1)[-1].strip()
+                        reason = reason_text[:60]
+                    elif lower.startswith("证据"):
+                        evidence_text = normalized.split(":", 1)[-1].strip()
+                        evidence = evidence_text[:80]
+                
+                if score_val is None:
+                    score_val = 0
+                
+                score_distribution[score_val] = score_distribution.get(score_val, 0) + 1
+                
+                results.append(ClarificationResult(
+                    req_id=req_id,
+                    score=score_val,
+                    reason=reason,
+                    evidence=evidence or None
+                ))
             
             # 记录评分结果统计
             self.logger.info("评分结果统计:")

@@ -46,7 +46,6 @@ class ReqParseAgent:
    - 需求结构格式制作: 灵活使用#、##、###等级标题表达层次
    - 列表运用: 以条目列表形式呈现节点内容
    - 语言保持: 保持原文语言与用词
-   - Emoji增强: 合理使用Emoji增强视觉导向与可读性
 
 3. Rules
 
@@ -54,7 +53,6 @@ class ReqParseAgent:
    - 原文尊重：所有内容必须保留原文句子，杜绝改写或删减关键内容
    - 结构清晰：层级分明，结构简洁，避免内容堆叠不清晰
    - 语言一致：输出语言应与原文本主要语言保持一致
-   - 可视增强：尽量融合Emoji，增强层次感和视觉舒适度
 
 
 2. 行为准则：
@@ -75,7 +73,7 @@ class ReqParseAgent:
 - 目标: 将原始文本内容转化为清晰分层的需求结构Markdown格式，便于直接阅读和内容解析
 - 步骤 1: 彻底阅读并理解原始内容，分析其内在逻辑和层级关系
 - 步骤 2: 按照层级使用#标题标记，条目采用列表形式排列，确保不少于三级层级
-- 步骤 3: 对长句进行分点拆解，调整句式增强表述清晰度，并合适插入Emoji提升视觉效果
+- 步骤 3: 对长句进行分点拆解，调整句式增强表述清晰度
 - 步骤 4: 最终输出为纯Markdown格式，只输出 Markdown文本本体，不要使用代码块包裹。
 - 预期结果: 输出符合规范的Markdown格式需求结构文本，层级明晰，内容完整，语言统一，无任何附加解释或内容
 
@@ -97,7 +95,7 @@ class ReqParseAgent:
             # 记录完整请求内容
             self.logger.debug("完整请求内容:")
             self.logger.debug(f"  System: {system_message}")
-            self.logger.debug(f"  User: {prompt[:500]}..." if len(prompt) > 500 else f"  User: {prompt}")
+            self.logger.debug(f"  User: {prompt}")
             
             response = self.client.chat.completions.create(
                 model=Config.OPENAI_MODEL,
@@ -112,9 +110,8 @@ class ReqParseAgent:
             # 记录完整响应内容
             content = response.choices[0].message.content
             if content:
-                self.logger.debug("完整响应内容（前500字符）:")
-                preview = content[:500] + "..." if len(content) > 500 else content
-                for line in preview.split("\n")[:20]:  # 只记录前20行
+                self.logger.debug("完整响应内容:")
+                for line in content.split("\n"):
                     self.logger.debug(f"  {line}")
                 
                 # 记录Token使用情况（如果可用）

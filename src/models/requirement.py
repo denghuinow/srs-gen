@@ -10,6 +10,7 @@ class Requirement(BaseModel):
     score: Optional[int] = Field(None, description="评分 (-2到+2)")
     reason: Optional[str] = Field(None, description="评分理由（仅用于审计，不传递给ReqExplore）")
     iteration: Optional[int] = Field(None, description="生成时的迭代轮次")
+    evidence: Optional[str] = Field(None, description="评分引用的基准证据")
 
 
 class RequirementList(BaseModel):
@@ -68,3 +69,7 @@ class ClarificationResult(BaseModel):
     req_id: str
     score: int = Field(..., ge=-2, le=2, description="评分 (-2到+2)")
     reason: str = Field(..., max_length=60, description="评分理由，不超过60字")
+    evidence: Optional[str] = Field(
+        default=None,
+        description="引用的基准证据信息，用于审计"
+    )

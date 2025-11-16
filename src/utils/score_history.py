@@ -10,6 +10,7 @@ class ScoreRecord:
     iteration: int
     score: int
     reason: Optional[str] = None
+    evidence: Optional[str] = None
 
 
 class ScoreHistory:
@@ -18,11 +19,20 @@ class ScoreHistory:
     def __init__(self):
         self.history: Dict[str, List[ScoreRecord]] = {}
     
-    def record(self, req_id: str, iteration: int, score: int, reason: Optional[str] = None) -> None:
+    def record(
+        self,
+        req_id: str,
+        iteration: int,
+        score: int,
+        reason: Optional[str] = None,
+        evidence: Optional[str] = None
+    ) -> None:
         """记录需求得分"""
         if req_id not in self.history:
             self.history[req_id] = []
-        self.history[req_id].append(ScoreRecord(iteration=iteration, score=score, reason=reason))
+        self.history[req_id].append(
+            ScoreRecord(iteration=iteration, score=score, reason=reason, evidence=evidence)
+        )
     
     def get_history(self, req_id: str) -> List[ScoreRecord]:
         """获取需求的得分历史"""
@@ -36,7 +46,8 @@ class ScoreHistory:
                 {
                     "iteration": r.iteration,
                     "score": r.score,
-                    "reason": r.reason[:30] + "..." if r.reason and len(r.reason) > 30 else r.reason
+                    "reason": r.reason[:30] + "..." if r.reason and len(r.reason) > 30 else r.reason,
+                    "evidence": r.evidence[:50] + "..." if r.evidence and len(r.evidence) > 50 else r.evidence
                 }
                 for r in records
             ]
@@ -57,3 +68,10 @@ class ScoreHistory:
             return False
         records = self.history[req_id]
         return any(record.score >= min_score for record in records)
+
+    def get_best_score(self, req_id: str) -> Optional[int]:
+        """获取需求历史中的最高得分"""
+        records = self.history.get(req_id)
+        if not records:
+            return None
+        return max(record.score for record in records)

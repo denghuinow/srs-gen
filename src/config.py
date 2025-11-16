@@ -23,11 +23,13 @@ class Config:
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_BASE_URL: Optional[str] = os.getenv("OPENAI_BASE_URL", None)
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    STREAM_RESPONSE: bool = os.getenv("STREAM_RESPONSE", "true").lower() in ("true", "1", "yes")
     
     # 迭代配置
     MAX_ITERATIONS: int = int(os.getenv("MAX_ITERATIONS", "5"))
     CONVERGENCE_THRESHOLD: int = 0  # 收敛阈值：无负分条目
     NEW_REQUIREMENTS_PER_ITERATION: int = int(os.getenv("NEW_REQUIREMENTS_PER_ITERATION", "10"))  # 每次迭代增加的新需求数量
+    MIN_REQUIREMENTS_PER_BRANCH: int = int(os.getenv("MIN_REQUIREMENTS_PER_BRANCH", "2"))  # 每个需求分支至少补充的需求数量
     
     # 消融模式
     ABLATION_MODE: AblationMode = os.getenv("ABLATION_MODE", "default")  # type: ignore
