@@ -33,10 +33,10 @@ class WorkflowOrchestrator:
             self.timer_manager = state["timer_manager"]
         
         agent = ReqParseAgent(self.client, self.timer_manager)
-        mindmap_structure = agent.parse(state["raw_input"])
+        requirement_structure = agent.parse(state["raw_input"])
         
-        # 存储思维导图结构到状态
-        state["mindmap_structure"] = mindmap_structure  # type: ignore
+        # 存储需求结构到状态
+        state["requirement_structure"] = requirement_structure  # type: ignore
         return state
     
     def _explore_node(self, state: WorkflowState) -> WorkflowState:
@@ -53,7 +53,7 @@ class WorkflowOrchestrator:
             self.logger.info(f"继续迭代，迭代号递增至: {state['iteration_count']}")
         
         agent = ReqExploreAgent(self.client, state["timer_manager"])
-        mindmap_structure = state.get("mindmap_structure", "")  # type: ignore
+        requirement_structure = state.get("requirement_structure", "")  # type: ignore
         raw_input = state["raw_input"]
         
         # 记录挖掘前的需求ID集合
@@ -61,11 +61,11 @@ class WorkflowOrchestrator:
         self.logger.debug(f"[迭代 {state['iteration_count']}] 挖掘前需求ID集合: {sorted(req_ids_before)}")
         
         if self.ablation_mode == "no-explore-clarify":
-            # no-explore-clarify 模式：基于思维导图结构直接生成基础需求（简化版探索）
-            self.logger.info(f"[迭代 {state['iteration_count']}] no-explore-clarify 模式：基于思维导图结构生成基础需求")
+            # no-explore-clarify 模式：基于需求结构直接生成基础需求（简化版探索）
+            self.logger.info(f"[迭代 {state['iteration_count']}] no-explore-clarify 模式：基于需求结构生成基础需求")
             # 使用简化的探索逻辑，只生成基础需求
             state["requirements"] = agent.explore(
-                mindmap_structure,
+                requirement_structure,
                 raw_input,
                 state["requirements"],
                 state["forbidden_list"],
@@ -74,7 +74,7 @@ class WorkflowOrchestrator:
         else:
             # 正常挖掘
             state["requirements"] = agent.explore(
-                mindmap_structure,
+                requirement_structure,
                 raw_input,
                 state["requirements"],
                 state["forbidden_list"],

@@ -6,7 +6,7 @@ from ..utils.logger import get_logger
 
 
 class ReqParseAgent:
-    """需求解析智能体：将自然语言需求解析为思维导图结构"""
+    """需求解析智能体：将自然语言需求解析为需求结构"""
     
     def __init__(self, client: OpenAI, timer_manager: TimerManager):
         self.client = client
@@ -14,24 +14,24 @@ class ReqParseAgent:
         self.logger = get_logger("ReqParse")
     
     def parse(self, raw_input: str) -> str:
-        """解析自然语言需求为思维导图结构（Markdown格式）"""
+        """解析自然语言需求为需求结构（Markdown格式）"""
         self.timer.start()
         
         try:
-            self.logger.info(f"开始生成思维导图结构，输入长度: {len(raw_input)} 字符")
+            self.logger.info(f"开始生成需求结构，输入长度: {len(raw_input)} 字符")
             self.logger.debug(f"输入文本摘要: {raw_input[:200]}..." if len(raw_input) > 200 else f"输入文本: {raw_input}")
             
-            # 思维导图生成 Prompt（参考 index.html 的 defaultPrompt）
-            mindmap_prompt_template = """{{CONTENT}}
-请按以下设定的思维导图架构师的身份对以上内容执行任务。
+            # 需求结构生成 Prompt（参考 index.html 的 defaultPrompt）
+            requirement_structure_prompt_template = """{{CONTENT}}
+请按以下设定的需求结构架构师的身份对以上内容执行任务。
 
-# Role: 思维导图架构师
+# Role: 需求结构架构师
 
 ## Profile
-- description: 精通信息结构提取与层次关系分析，能够将复杂文本内容转化为清晰、分层的思维导图格式，便于阅读与理解。
+- description: 精通信息结构提取与层次关系分析，能够将复杂文本内容转化为清晰、分层的需求结构格式，便于阅读与理解。
 - background: 拥有丰富的信息架构设计经验，熟悉多种内容结构优化方法，擅长运用Markdown及视觉元素增强内容表现力。
 - personality: 细致严谨，逻辑清晰，注重条理性与用户体验，表达简洁明了。
-- expertise: 信息架构设计、内容层次化、结构化表达、Markdown思维导图制作。
+- expertise: 信息架构设计、内容层次化、结构化表达、Markdown需求结构制作。
 - target_audience: 内容编辑人员、文档撰写者、项目管理者、学习者及需要清晰信息结构的用户群体。
 
 ## Skills
@@ -43,7 +43,7 @@ class ReqParseAgent:
    - 逻辑优化: 保持结构简洁且易读
 
 2. Markdown及可视化表达
-   - 思维导图格式制作: 灵活使用#、##、###等级标题表达层次
+   - 需求结构格式制作: 灵活使用#、##、###等级标题表达层次
    - 列表运用: 以条目列表形式呈现节点内容
    - 语言保持: 保持原文语言与用词
    - Emoji增强: 合理使用Emoji增强视觉导向与可读性
@@ -72,20 +72,20 @@ class ReqParseAgent:
 
 ## Workflows
 
-- 目标: 将原始文本内容转化为清晰分层的思维导图Markdown格式，便于直接阅读和内容解析
+- 目标: 将原始文本内容转化为清晰分层的需求结构Markdown格式，便于直接阅读和内容解析
 - 步骤 1: 彻底阅读并理解原始内容，分析其内在逻辑和层级关系
 - 步骤 2: 按照层级使用#标题标记，条目采用列表形式排列，确保不少于三级层级
 - 步骤 3: 对长句进行分点拆解，调整句式增强表述清晰度，并合适插入Emoji提升视觉效果
 - 步骤 4: 最终输出为纯Markdown格式，只输出 Markdown文本本体，不要使用代码块包裹。
-- 预期结果: 输出符合规范的Markdown格式思维导图文本，层级明晰，内容完整，语言统一，无任何附加解释或内容
+- 预期结果: 输出符合规范的Markdown格式需求结构文本，层级明晰，内容完整，语言统一，无任何附加解释或内容
 
 ## Initialization
-作为思维导图架构师，你必须遵守上述Rules，按照Workflows执行任务。"""
+作为需求结构架构师，你必须遵守上述Rules，按照Workflows执行任务。"""
             
             # 替换占位符
-            prompt = mindmap_prompt_template.replace("{{CONTENT}}", raw_input)
+            prompt = requirement_structure_prompt_template.replace("{{CONTENT}}", raw_input)
             
-            system_message = "你是一个专业的需求分析师和思维导图架构师，擅长将自然语言需求转化为清晰的思维导图结构。"
+            system_message = "你是一个专业的需求分析师和需求结构架构师，擅长将自然语言需求转化为清晰的需求结构。"
             
             # 记录API调用参数
             api_params = {
@@ -123,24 +123,24 @@ class ReqParseAgent:
                     self.logger.debug(f"Token使用情况: prompt_tokens={usage.prompt_tokens}, completion_tokens={usage.completion_tokens}, total_tokens={usage.total_tokens}")
                 
                 # 清理可能的代码块包裹
-                mindmap_structure = content.strip()
-                if mindmap_structure.startswith("```"):
+                requirement_structure = content.strip()
+                if requirement_structure.startswith("```"):
                     # 移除代码块标记
-                    lines = mindmap_structure.split("\n")
+                    lines = requirement_structure.split("\n")
                     # 移除第一行和最后一行（代码块标记）
                     if len(lines) > 2:
-                        mindmap_structure = "\n".join(lines[1:-1])
+                        requirement_structure = "\n".join(lines[1:-1])
                     else:
-                        mindmap_structure = ""
+                        requirement_structure = ""
                 
-                self.logger.info(f"思维导图结构生成完成，长度: {len(mindmap_structure)} 字符")
-                return mindmap_structure
+                self.logger.info(f"需求结构生成完成，长度: {len(requirement_structure)} 字符")
+                return requirement_structure
             else:
                 self.logger.warning("API响应为空")
                 return ""
         
         except Exception as e:
-            self.logger.error(f"生成思维导图结构过程中发生错误: {e}", exc_info=True)
+            self.logger.error(f"生成需求结构过程中发生错误: {e}", exc_info=True)
             raise
         
         finally:

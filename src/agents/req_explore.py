@@ -17,7 +17,7 @@ class ReqExploreAgent:
     
     def explore(
         self,
-        mindmap_structure: str,
+        requirement_structure: str,
         raw_input: str,
         existing_requirements: RequirementList,
         forbidden_list: ForbiddenList,
@@ -28,8 +28,8 @@ class ReqExploreAgent:
         
         try:
             self.logger.info(f"开始挖掘需求（迭代 {iteration}）")
-            self.logger.info(f"思维导图结构长度: {len(mindmap_structure)} 字符")
-            self.logger.debug(f"思维导图结构预览: {mindmap_structure[:300]}..." if len(mindmap_structure) > 300 else f"思维导图结构: {mindmap_structure}")
+            self.logger.info(f"需求结构长度: {len(requirement_structure)} 字符")
+            self.logger.debug(f"需求结构预览: {requirement_structure[:300]}..." if len(requirement_structure) > 300 else f"需求结构: {requirement_structure}")
             
             # 获取用于探索的现有需求（仅id和score，不包含reason - FR-013）
             existing_for_explore = existing_requirements.get_for_explore()
@@ -77,15 +77,15 @@ class ReqExploreAgent:
             new_req_count = Config.NEW_REQUIREMENTS_PER_ITERATION
             
             system_message = "你是一个专业的需求分析师，擅长挖掘和补充系统需求，并能生成详细的功能规格说明。"
-            prompt = f"""基于以下用户原始需求、思维导图结构和现有需求评分，完成两个任务：
+            prompt = f"""基于以下用户原始需求、需求结构和现有需求评分，完成两个任务：
 1. **改进现有需求**：对于评分<1的需求，必须重新生成改进版本，使用相同的ID
-2. **补充新需求**：基于思维导图结构挖掘异常路径、权限控制、数据完整性等隐含需求，补充缺口
+2. **补充新需求**：基于需求结构挖掘异常路径、权限控制、数据完整性等隐含需求，补充缺口
 
 **用户原始需求：**
 {raw_input}
 
-**思维导图结构：**
-{mindmap_structure}
+**需求结构：**
+{requirement_structure}
 
 {existing_context}
 {improvement_context}
@@ -97,7 +97,7 @@ class ReqExploreAgent:
 - **对于评分<1的现有需求，必须重新生成改进版本，使用相同的ID**
 - 对于评分≥1的现有需求，可以保持不变或轻微优化，使用相同的ID
 - **本次迭代必须至少生成 {new_req_count} 个新的补充需求**（使用新ID，从 {next_id} 开始）
-- 新需求应该基于思维导图结构中的各个分支和节点进行深入挖掘
+- 新需求应该基于需求结构中的各个分支和节点进行深入挖掘
 
 要求：
 1. 使用业务语言表述
@@ -105,9 +105,9 @@ class ReqExploreAgent:
    - 分析为什么评分低（评分是用户反馈，可能与用户期望不一致、描述不清晰、缺少关键细节等）
    - 重新设计需求，使其更符合用户期望
    - 使用相同的需求ID重新生成
-3. **基于思维导图结构补充新需求**：
-   - 仔细分析思维导图结构中的各个层级和分支
-   - 针对思维导图中的每个主要节点和子节点，挖掘相关的功能需求
+3. **基于需求结构补充新需求**：
+   - 仔细分析需求结构中的各个层级和分支
+   - 针对需求结构中的每个主要节点和子节点，挖掘相关的功能需求
    - 补充异常处理、权限控制、数据验证等隐含需求
    - 确保至少生成 {new_req_count} 个新的补充需求
 4. 避免生成与禁用清单相似的需求

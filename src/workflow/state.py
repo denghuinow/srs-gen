@@ -18,5 +18,5 @@ class WorkflowState(TypedDict, total=False):
     ablation_mode: str
     convergence_reached: bool
     max_iterations: int
-    mindmap_structure: str  # 思维导图结构（Markdown格式）
+    requirement_structure: str  # 需求结构（Markdown格式）
     _srs_document: str  # 临时存储生成的SRS文档
