@@ -33,10 +33,10 @@ class WorkflowOrchestrator:
             self.timer_manager = state["timer_manager"]
         
         agent = ReqParseAgent(self.client, self.timer_manager)
-        atomic_requirements = agent.parse(state["raw_input"])
+        mindmap_structure = agent.parse(state["raw_input"])
         
-        # 存储原子需求到状态（临时）
-        state["_atomic_requirements"] = atomic_requirements  # type: ignore
+        # 存储思维导图结构到状态
+        state["mindmap_structure"] = mindmap_structure  # type: ignore
         return state
     
     def _explore_node(self, state: WorkflowState) -> WorkflowState:
@@ -53,22 +53,29 @@ class WorkflowOrchestrator:
             self.logger.info(f"继续迭代，迭代号递增至: {state['iteration_count']}")
         
         agent = ReqExploreAgent(self.client, state["timer_manager"])
-        atomic_requirements = state.get("_atomic_requirements", [])  # type: ignore
+        mindmap_structure = state.get("mindmap_structure", "")  # type: ignore
+        raw_input = state["raw_input"]
         
         # 记录挖掘前的需求ID集合
         req_ids_before = set(req.id for req in state["requirements"].requirements)
         self.logger.debug(f"[迭代 {state['iteration_count']}] 挖掘前需求ID集合: {sorted(req_ids_before)}")
         
         if self.ablation_mode == "no-explore-clarify":
-            # 直接映射原子需求
-            state["requirements"] = agent.map_atomic_to_requirements(
-                atomic_requirements,
-                iteration=state["iteration_count"]
+            # no-explore-clarify 模式：基于思维导图结构直接生成基础需求（简化版探索）
+            self.logger.info(f"[迭代 {state['iteration_count']}] no-explore-clarify 模式：基于思维导图结构生成基础需求")
+            # 使用简化的探索逻辑，只生成基础需求
+            state["requirements"] = agent.explore(
+                mindmap_structure,
+                raw_input,
+                state["requirements"],
+                state["forbidden_list"],
+                state["iteration_count"]
             )
         else:
             # 正常挖掘
             state["requirements"] = agent.explore(
-                atomic_requirements,
+                mindmap_structure,
+                raw_input,
                 state["requirements"],
                 state["forbidden_list"],
                 state["iteration_count"]
@@ -203,18 +210,22 @@ class WorkflowOrchestrator:
         """生成节点"""
         agent = DocGenerateAgent(self.client, state["timer_manager"])
         
-        # 只传递评分>=1的需求给文档生成器
-        filtered_requirements = state["requirements"].filter_by_score(min_score=1)
+        # 基于历史得分筛选：只要历史中曾经有过>=1的得分，就进入文档生成
+        filtered_requirements = RequirementList()
+        excluded_ids = []
+        
+        for req in state["requirements"].requirements:
+            # 检查历史得分是否>=1
+            if state["score_history"].has_score_above_or_equal(req.id, min_score=1):
+                filtered_requirements.requirements.append(req)
+            else:
+                excluded_ids.append(req.id)
         
         # 记录过滤信息
         total_count = len(state["requirements"].requirements)
         filtered_count = len(filtered_requirements.requirements)
         if total_count != filtered_count:
-            self.logger.info(f"文档生成：从 {total_count} 个需求中筛选出 {filtered_count} 个评分>=1的需求")
-            excluded_ids = [
-                req.id for req in state["requirements"].requirements
-                if req.score is None or req.score < 1
-            ]
+            self.logger.info(f"文档生成：从 {total_count} 个需求中筛选出 {filtered_count} 个历史得分>=1的需求")
             if excluded_ids:
                 self.logger.debug(f"被排除的需求ID: {sorted(excluded_ids)}")
         

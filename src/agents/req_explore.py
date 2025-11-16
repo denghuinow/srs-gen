@@ -1,5 +1,4 @@
 """需求挖掘智能体 (FR-002)"""
-from typing import List, Dict
 from openai import OpenAI
 from ..config import Config
 from ..models.requirement import Requirement, RequirementList
@@ -18,7 +17,8 @@ class ReqExploreAgent:
     
     def explore(
         self,
-        atomic_requirements: List[str],
+        mindmap_structure: str,
+        raw_input: str,
         existing_requirements: RequirementList,
         forbidden_list: ForbiddenList,
         iteration: int
@@ -28,8 +28,8 @@ class ReqExploreAgent:
         
         try:
             self.logger.info(f"开始挖掘需求（迭代 {iteration}）")
-            self.logger.info(f"原子需求数量: {len(atomic_requirements)}")
-            self.logger.debug(f"原子需求列表: {atomic_requirements}")
+            self.logger.info(f"思维导图结构长度: {len(mindmap_structure)} 字符")
+            self.logger.debug(f"思维导图结构预览: {mindmap_structure[:300]}..." if len(mindmap_structure) > 300 else f"思维导图结构: {mindmap_structure}")
             
             # 获取用于探索的现有需求（仅id和score，不包含reason - FR-013）
             existing_for_explore = existing_requirements.get_for_explore()
@@ -73,13 +73,20 @@ class ReqExploreAgent:
                 improvement_context += f"以下需求评分低于1分，必须重新生成改进版本，使用相同的ID：{', '.join(improvement_ids)}\n"
                 improvement_context += "请分析评分低的原因（评分是用户反馈），重新设计使其更符合用户期望。\n"
             
+            # 获取每次迭代需要增加的新需求数量
+            new_req_count = Config.NEW_REQUIREMENTS_PER_ITERATION
+            
             system_message = "你是一个专业的需求分析师，擅长挖掘和补充系统需求，并能生成详细的功能规格说明。"
-            prompt = f"""基于以下原子需求和现有需求评分，完成两个任务：
+            prompt = f"""基于以下用户原始需求、思维导图结构和现有需求评分，完成两个任务：
 1. **改进现有需求**：对于评分<1的需求，必须重新生成改进版本，使用相同的ID
-2. **补充新需求**：挖掘异常路径、权限控制、数据完整性等隐含需求，补充缺口
+2. **补充新需求**：基于思维导图结构挖掘异常路径、权限控制、数据完整性等隐含需求，补充缺口
 
-原子需求：
-{chr(10).join(f"- {req}" for req in atomic_requirements)}
+**用户原始需求：**
+{raw_input}
+
+**思维导图结构：**
+{mindmap_structure}
+
 {existing_context}
 {improvement_context}
 {forbidden_context}
@@ -89,7 +96,8 @@ class ReqExploreAgent:
 - 新需求必须从 {next_id} 开始，不得重复使用现有ID（REQ-001 到 {max_id}）
 - **对于评分<1的现有需求，必须重新生成改进版本，使用相同的ID**
 - 对于评分≥1的现有需求，可以保持不变或轻微优化，使用相同的ID
-- 只生成新需求时，必须使用新的ID（从 {next_id} 开始）
+- **本次迭代必须至少生成 {new_req_count} 个新的补充需求**（使用新ID，从 {next_id} 开始）
+- 新需求应该基于思维导图结构中的各个分支和节点进行深入挖掘
 
 要求：
 1. 使用业务语言表述
@@ -97,7 +105,11 @@ class ReqExploreAgent:
    - 分析为什么评分低（评分是用户反馈，可能与用户期望不一致、描述不清晰、缺少关键细节等）
    - 重新设计需求，使其更符合用户期望
    - 使用相同的需求ID重新生成
-3. 补充异常处理、权限控制、数据验证等隐含需求
+3. **基于思维导图结构补充新需求**：
+   - 仔细分析思维导图结构中的各个层级和分支
+   - 针对思维导图中的每个主要节点和子节点，挖掘相关的功能需求
+   - 补充异常处理、权限控制、数据验证等隐含需求
+   - 确保至少生成 {new_req_count} 个新的补充需求
 4. 避免生成与禁用清单相似的需求
 5. 每个需求条目必须包含详细的功能规格说明，包括：
    - 功能描述：清晰说明该需求要实现的功能
@@ -106,12 +118,12 @@ class ReqExploreAgent:
    - 前置条件：执行该功能前需要满足的条件
    - 后置条件：执行该功能后系统应达到的状态
    - 输入输出：说明需要输入的数据和系统输出的结果
-6. 输出格式：每个需求以 "REQ-XXX:" 开头，后跟详细描述（可以跨多行），使用Markdown格式组织内容
+6. 输出格式：每个需求以 "REQ-XXX:" 开头（不要使用Markdown粗体标记**包裹需求ID），后跟详细描述（可以跨多行），使用Markdown格式组织内容
 7. 每个需求之间用 "---" 分隔符明确分隔（在需求详细内容结束后，下一个REQ-XXX之前添加 "---"）
 
 请输出完整的需求清单，包括：
 - **改进后的现有需求**（评分<1的必须改进，使用原ID；评分≥1的可保持不变或优化，使用原ID）
-- **新增的补充需求**（使用新ID，从 {next_id} 开始）
+- **新增的补充需求**（使用新ID，从 {next_id} 开始，至少 {new_req_count} 个）
 每个需求都要包含上述详细说明。"""
             
             # 记录API调用参数
@@ -204,8 +216,13 @@ class ReqExploreAgent:
                     parts = line.split(":", 1)
                     req_id = parts[0].strip()
                     
-                    # 验证ID格式
-                    if req_id.startswith("REQ-"):
+                    # 去除Markdown格式标记（**、*、`等），确保能正确识别需求ID
+                    req_id_clean = req_id.replace("**", "").replace("*", "").replace("`", "").strip()
+                    
+                    # 验证ID格式（使用清理后的ID）
+                    if req_id_clean.startswith("REQ-"):
+                        # 使用清理后的ID作为需求ID
+                        req_id = req_id_clean
                         # 保存之前的需求（如果有）
                         if current_req_id and current_req_text_lines:
                             req_text = "\n".join(current_req_text_lines).strip()
@@ -275,31 +292,3 @@ class ReqExploreAgent:
         finally:
             self.timer.stop()
     
-    def map_atomic_to_requirements(
-        self,
-        atomic_requirements: List[str],
-        iteration: int = 0
-    ) -> RequirementList:
-        """将原子需求直接映射为REQ-xxx条目（用于no-explore-clarify模式）"""
-        self.logger.info(f"使用 no-explore-clarify 模式，直接映射原子需求（迭代 {iteration}）")
-        self.logger.debug(f"原子需求数量: {len(atomic_requirements)}")
-        
-        requirements = RequirementList()
-        
-        for i, atomic_req in enumerate(atomic_requirements, 1):
-            req_id = f"REQ-{i:03d}"
-            req = Requirement(
-                id=req_id,
-                text=atomic_req,
-                score=0,  # 默认0分
-                iteration=iteration
-            )
-            if not requirements.add(req):
-                self.logger.warning(f"需求 {req_id} 在映射时重复，已跳过")
-        
-        self.logger.info(f"映射完成，生成需求数量: {len(requirements.requirements)}")
-        if requirements.requirements:
-            req_ids = [req.id for req in requirements.requirements]
-            self.logger.debug(f"生成的需求ID: {req_ids}")
-        
-        return requirements

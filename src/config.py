@@ -27,6 +27,7 @@ class Config:
     # 迭代配置
     MAX_ITERATIONS: int = int(os.getenv("MAX_ITERATIONS", "5"))
     CONVERGENCE_THRESHOLD: int = 0  # 收敛阈值：无负分条目
+    NEW_REQUIREMENTS_PER_ITERATION: int = int(os.getenv("NEW_REQUIREMENTS_PER_ITERATION", "5"))  # 每次迭代增加的新需求数量
     
     # 消融模式
     ABLATION_MODE: AblationMode = os.getenv("ABLATION_MODE", "default")  # type: ignore

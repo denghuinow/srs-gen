@@ -50,3 +50,10 @@ class ScoreHistory:
         """获取进入最终清单的需求数"""
         final_ids = {req.id for req in final_requirements}
         return len([req_id for req_id in self.history.keys() if req_id in final_ids])
+    
+    def has_score_above_or_equal(self, req_id: str, min_score: int = 1) -> bool:
+        """检查需求是否在历史中曾经有过 >= min_score 的得分"""
+        if req_id not in self.history:
+            return False
+        records = self.history[req_id]
+        return any(record.score >= min_score for record in records)
