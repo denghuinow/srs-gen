@@ -8,8 +8,6 @@ from .logger import get_logger
 
 logger = get_logger("Continuation")
 
-CONTINUATION_PROMPT = "上次回答因为达到 max_tokens 限制被截断。请从中断处继续完整输出剩余内容，保持相同的结构和格式，不要重复已经输出的内容。"
-
 
 def continue_on_truncation(
     client: OpenAI,
@@ -20,6 +18,9 @@ def continue_on_truncation(
 ) -> Tuple[str, Optional[str]]:
     """
     当模型因为max_tokens截断时自动发送接续请求
+    
+    使用对话前缀续写方式：将已生成的内容作为 assistant 消息，设置 prefix: True 和 partial: True，
+    让模型从该前缀继续生成，避免重复输出表头和上一行。
 
     Args:
         client: OpenAI客户端实例
@@ -52,9 +53,23 @@ def continue_on_truncation(
         attempt += 1
         logger.info(f"{task_name} 响应达到 max_tokens，自动发送第 {attempt}/{total_attempts} 次接续请求...")
         
+        # 使用对话前缀续写：更新最后一个 assistant 消息，而不是追加新消息
         continuation_messages = copy.deepcopy(base_messages)
-        continuation_messages.append({"role": "assistant", "content": combined_text})
-        continuation_messages.append({"role": "user", "content": CONTINUATION_PROMPT})
+        # 如果最后一个消息是 assistant 消息，更新它；否则追加新的
+        if continuation_messages and continuation_messages[-1].get("role") == "assistant":
+            continuation_messages[-1] = {
+                "role": "assistant",
+                "content": combined_text,
+                "prefix": True,
+                "partial": True
+            }
+        else:
+            continuation_messages.append({
+                "role": "assistant",
+                "content": combined_text,
+                "prefix": True,
+                "partial": True
+            })
 
         continuation_params = {
             k: v for k, v in api_params.items() if k != "messages"
