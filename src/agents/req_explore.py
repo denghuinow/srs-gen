@@ -6,7 +6,7 @@ from ..models.requirement import Requirement, RequirementList
 from ..utils.timer import TimerManager
 from ..utils.forbidden_list import ForbiddenList
 from ..utils.logger import get_logger
-from ..utils.continuation import continue_on_truncation
+from ..utils.streaming import stream_with_continuation
 
 
 class ReqExploreAgent:
@@ -197,41 +197,37 @@ class ReqExploreAgent:
 - **新增的补充需求**（使用新ID，从 {next_id} 开始，至少 {new_req_count} 个）
 每个需求都要包含上述详细说明。"""
             
-            # 构建API调用参数
-            api_params = {
-                "model": Config.OPENAI_MODEL,
-                "messages": [
-                    {"role": "system", "content": system_message},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.7
-            }
-            
-            # 如果配置了MAX_TOKENS，使用配置值
-            max_tokens = Config.get_max_tokens()
-            if max_tokens is not None:
-                api_params["max_tokens"] = max_tokens
-            
-            # 记录API调用参数
-            self.logger.debug(f"API调用参数: {api_params}")
-            
             # 记录完整请求内容
             self.logger.debug("完整请求内容:")
             self.logger.debug(f"  System: {system_message}")
             self.logger.debug(f"  User: {prompt}")
             
-            response = self.client.chat.completions.create(**api_params)
+            # 始终使用流式响应
+            self.logger.info("开始流式生成需求挖掘结果...")
             
-            # 获取初始响应内容
-            content = response.choices[0].message.content or ""
-            finish_reason = response.choices[0].finish_reason
+            # 构建消息列表用于续接
+            messages = [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": prompt}
+            ]
             
-            # 如果因max_tokens截断，自动续接
-            content, finish_reason = continue_on_truncation(
-                self.client,
-                api_params,
-                content,
-                finish_reason,
+            # 构建API调用基础参数
+            base_api_params = {
+                "model": Config.OPENAI_MODEL,
+                "temperature": 0.7,
+            }
+            max_tokens = Config.get_max_tokens()
+            if max_tokens is not None:
+                base_api_params["max_tokens"] = max_tokens
+            
+            # 记录API调用参数
+            self.logger.debug(f"API调用基础参数: {base_api_params}")
+            
+            # 使用统一的流式响应和续接处理
+            content = stream_with_continuation(
+                client=self.client,
+                base_api_params=base_api_params,
+                messages=messages,
                 task_name="需求挖掘"
             )
             

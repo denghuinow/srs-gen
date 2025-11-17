@@ -1,14 +1,12 @@
 """文档生成智能体 (FR-004)"""
 
-import sys
-from typing import Tuple
 from openai import OpenAI
 from ..config import Config
 from ..models.requirement import RequirementList
 from ..models.srs_template import SRSTemplate
 from ..utils.timer import TimerManager
 from ..utils.logger import get_logger
-from ..utils.continuation import continue_on_truncation
+from ..utils.streaming import stream_with_continuation
 
 
 class DocGenerateAgent:
@@ -35,18 +33,13 @@ class DocGenerateAgent:
             requirements: 需求清单
             project_name: 项目名称
             raw_input: 原始输入
-            stream: 是否使用流式响应（默认从Config读取）
+            stream: 已废弃，始终使用流式响应
             requirement_structure: 需求结构（Markdown格式）
             ablation_mode: 消融模式
         
         Returns:
             生成的SRS文档内容
         """
-        # 如果未指定stream参数，从配置中读取
-        if stream is None:
-            stream = Config.STREAM_RESPONSE
-        current_stream = stream
-        
         self.timer.start()
 
         try:
@@ -89,6 +82,9 @@ Ensure the document follows professional SRS standards with proper sections, for
             self.logger.debug("完整请求内容:")
             self.logger.debug(f"  User: {prompt}")
 
+            # 始终使用流式响应
+            self.logger.info("开始流式生成SRS文档...")
+
             # 构建API调用基础参数
             base_api_params = {
                 "model": Config.OPENAI_MODEL,
@@ -100,62 +96,14 @@ Ensure the document follows professional SRS standards with proper sections, for
             if max_tokens is not None:
                 base_api_params["max_tokens"] = max_tokens
 
-            if current_stream:
-                self.logger.info("开始流式生成SRS文档...")
-
-            generated_parts = []
-            auto_continue_attempts = 0
-            max_auto_continue = Config.MAX_CONTINUATIONS
-
-            while True:
-                api_params = dict(base_api_params)
-                api_params["messages"] = messages
-                api_params["stream"] = current_stream
-
-                try:
-                    content, finish_reason = self._request_completion(api_params, current_stream)
-                except Exception as e:
-                    if current_stream:
-                        self.logger.error(f"流式生成过程中出错: {e}")
-                        current_stream = False
-                        self.logger.info("回退到非流式模式...")
-                        continue
-                    raise
-
-                if content:
-                    generated_parts.append(content)
-
-                # 对于非流式响应，使用统一的续接工具函数
-                if not current_stream and finish_reason == "length":
-                    accumulated_text = "".join(generated_parts)
-                    content, finish_reason = continue_on_truncation(
-                        self.client,
-                        api_params,
-                        accumulated_text,
-                        finish_reason,
-                        task_name="文档生成"
-                    )
-                    generated_parts = [content]
-                    if finish_reason != "length":
-                        break
-                    # 如果续接后仍然被截断，继续循环（但已经使用了续接次数）
-                    continue
-
-                if finish_reason != "length":
-                    break
-
-                # 流式响应的续接逻辑（保持原有逻辑）
-                auto_continue_attempts += 1
-                if auto_continue_attempts >= max_auto_continue:
-                    self.logger.warning(f"检测到连续截断且达到自动续接次数上限（{max_auto_continue}），停止继续请求。")
-                    break
-
-                self.logger.info(f"检测到输出因达到最大token限制被截断，自动续接（{auto_continue_attempts}/{max_auto_continue}）...")
-                if content:
-                    messages.append({"role": "assistant", "content": content})
-                messages.append({"role": "user", "content": "请继续完成上文未完的内容，保持相同的章节结构并直接衔接。"})
-
-            generated_doc = "".join(generated_parts)
+            # 使用统一的流式响应和续接处理
+            generated_doc = stream_with_continuation(
+                client=self.client,
+                base_api_params=base_api_params,
+                messages=messages,
+                task_name="文档生成",
+                continuation_prompt="请继续完成上文未完的内容，保持相同的章节结构并直接衔接。"
+            )
             if generated_doc:
                 self.logger.info(f"文档生成完成，长度: {len(generated_doc)} 字符")
                 self.logger.debug("完整响应内容:")
@@ -167,35 +115,3 @@ Ensure the document follows professional SRS standards with proper sections, for
 
         finally:
             self.timer.stop()
-
-    def _request_completion(self, api_params: dict, stream: bool) -> Tuple[str, str]:
-        """根据stream参数请求补全，并返回内容与结束原因"""
-        if stream:
-            return self._request_stream_completion(api_params)
-        return self._request_non_stream_completion(api_params)
-
-    def _request_stream_completion(self, api_params: dict) -> Tuple[str, str]:
-        """处理流式补全请求"""
-        content_parts = []
-        finish_reason = "stop"
-        stream_response = self.client.chat.completions.create(**api_params)
-        for chunk in stream_response:
-            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                content = chunk.choices[0].delta.content
-                content_parts.append(content)
-                sys.stdout.write(content)
-                sys.stdout.flush()
-            if chunk.choices and chunk.choices[0].finish_reason:
-                finish_reason = chunk.choices[0].finish_reason
-
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-
-        return "".join(content_parts), finish_reason
-
-    def _request_non_stream_completion(self, api_params: dict) -> Tuple[str, str]:
-        """处理非流式补全请求"""
-        response = self.client.chat.completions.create(**api_params)
-        content = response.choices[0].message.content if response.choices else ""
-        finish_reason = response.choices[0].finish_reason if response.choices else "stop"
-        return content or "", finish_reason or "stop"
