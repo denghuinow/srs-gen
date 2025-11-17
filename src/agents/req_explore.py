@@ -41,17 +41,6 @@ class ReqExploreAgent:
         
         return branches
     
-    def _build_branch_requirements(self, branches: List[str]) -> str:
-        """构建分支覆盖要求描述"""
-        if not branches:
-            return ""
-        lines = ["\n**结构分支覆盖要求：**"]
-        for branch in branches:
-            lines.append(
-                f"- {branch}: 本轮至少补充 {Config.MIN_REQUIREMENTS_PER_BRANCH} 条新需求，若该分支缺失需优先补齐"
-            )
-        return "\n".join(lines) + "\n"
-    
     def explore(
         self,
         requirement_structure: str,
@@ -90,41 +79,27 @@ class ReqExploreAgent:
             # 统计需要改进的需求（评分<1）
             needs_improvement = [req_info for req_info in existing_for_explore if req_info['score'] < 1]
             
+            # 计算需求结构数量（分支数量）
             branches = self._extract_branches(requirement_structure)
-            branch_context = self._build_branch_requirements(branches)
+            structure_count = len(branches) if branches else 1  # 如果没有分支，默认为1
             
-            # 构建提示词
-            existing_context = ""
+            # 计算新需求数量：结构数量 × 配置的倍数
+            new_req_count = structure_count * Config.NEW_REQUIREMENTS_MULTIPLIER
+            
+            self.logger.info(f"需求结构分支数量: {structure_count}, 倍数: {Config.NEW_REQUIREMENTS_MULTIPLIER}, 需要生成新需求数量: {new_req_count}")
+            
+            # 构建完整需求清单（包含id、评分、需求细节）
+            requirements_list = ""
             if existing_for_explore:
-                existing_context = "\n现有需求及其评分：\n"
                 for req_info in existing_for_explore:
-                    score_desc = ""
-                    if req_info['score'] < 1:
-                        score_desc = " ⚠️需要改进"
-                    # 包含需求文本内容，避免模型失忆
                     req_text = req_info.get('text', '')
-                    existing_context += f"- {req_info['id']}: 评分 {req_info['score']}{score_desc}\n"
-                    if req_text:
-                        existing_context += f"  需求内容: {req_text}\n"
-            
-            forbidden_context = ""
-            if forbidden_list.forbidden_ids:
-                forbidden_context = f"\n禁用需求ID（不得复用）：{', '.join(forbidden_list.forbidden_ids)}\n"
-            
-            improvement_context = ""
-            if needs_improvement:
-                improvement_ids = [req['id'] for req in needs_improvement]
-                improvement_context = f"\n**需要改进的需求（评分<1）：**\n"
-                improvement_context += f"以下需求评分低于1分，必须重新生成改进版本，使用相同的ID：{', '.join(improvement_ids)}\n"
-                improvement_context += "请分析评分低的原因（评分是用户反馈），重新设计使其更符合用户期望。\n"
-            
-            # 获取每次迭代需要增加的新需求数量
-            new_req_count = Config.NEW_REQUIREMENTS_PER_ITERATION
-            
-            system_message = "你是一个专业的需求分析师，擅长挖掘和补充系统需求，并能生成详细的功能规格说明。"
-            prompt = f"""基于以下用户原始需求、需求结构和现有需求评分，完成两个任务：
+                    requirements_list += f"- {req_info['id']}: 评分 {req_info['score']}\n{req_text}\n"
+
+
+            prompt = f"""你是一个专业的软件工程需求分析师，擅长挖掘和补充系统需求。
+基于以下信息完成两个任务：
 1. **改进现有需求**：对于评分<1的需求，必须重新生成改进版本，使用相同的ID
-2. **补充新需求**：基于需求结构挖掘异常路径、权限控制、数据完整性等隐含需求，补充缺口
+2. **补充新需求**：基于需求结构自由挖掘和补充新需求，必须生成至少 {new_req_count} 个新需求
 
 **用户原始需求：**
 {raw_input}
@@ -132,74 +107,22 @@ class ReqExploreAgent:
 **需求结构：**
 {requirement_structure}
 
-{existing_context}
-{improvement_context}
-{forbidden_context}
-
-**重要说明：**
-- 新需求必须从 {next_id} 开始。
-- **对于评分<1的现有需求，必须重新生成改进版本，保持使用原ID**
-- 对于评分≥1的现有需求，可以保持不变或轻微优化，保持使用原ID
-- **本次迭代必须至少生成 {new_req_count} 个新的补充需求**（使用新ID，从 {next_id} 开始）
-- 新需求应该基于需求结构中的各个分支和节点进行深入挖掘
-{branch_context}
+**完整需求清单：**
+{requirements_list}
 
 要求：
-1. 使用业务语言表述
-2. **重点关注改进评分<1的需求**：
-   - 分析为什么评分低（评分是用户反馈，可能与用户期望不一致、描述不清晰、缺少关键细节等）
-   - 重新设计需求，使其更符合用户期望
-   - 使用相同的需求ID重新生成
-3. **基于需求结构深入挖掘新需求**（必须生成至少 {new_req_count} 个新需求）：
-   
-   **深入挖掘方法：**
-   - **逐层分析**：从需求结构的第一级标题开始，逐层深入分析每个分支节点
-   - **节点展开**：针对需求结构中的每个主要节点和子节点，思考以下问题：
-     * 该节点涉及哪些具体的功能操作？
-     * 该功能需要哪些前置条件和后置条件？
-     * 该功能可能有哪些异常情况和边界条件？
-     * 该功能需要哪些权限控制和数据验证？
-     * 该功能与其他节点的关联关系是什么？
-   - **横向挖掘**：对于每个功能节点，挖掘以下隐含需求：
-     * 异常处理：网络中断、数据冲突、服务异常、用户操作错误等
-     * 权限控制：不同角色对该功能的访问权限、操作权限、数据查看权限
-     * 数据完整性：输入验证、格式检查、逻辑校验、关联性验证
-     * 性能优化：批量处理、缓存机制、异步处理、数据压缩
-     * 安全防护：数据加密、访问审计、操作日志、防注入攻击
-     * 用户体验：错误提示、操作引导、状态反馈、帮助文档
-   - **纵向扩展**：对于每个功能流程，思考：
-     * 流程的每个步骤需要哪些支持功能？
-     * 流程中可能出现的分支路径有哪些？
-     * 流程的异常退出和回滚机制是什么？
-   - **关联挖掘**：分析功能之间的关联关系：
-     * 哪些功能需要调用其他功能？
-     * 哪些功能会产生数据供其他功能使用？
-     * 哪些功能需要协同工作？
-   
-   **挖掘要求：**
-   - 必须确保需求结构的每个主要分支均有至少 {Config.MIN_REQUIREMENTS_PER_BRANCH} 条本轮新增或改进需求
-   - 必须覆盖异常处理、权限控制、数据验证等关键隐含需求
-   - 必须确保至少生成 {new_req_count} 个新的补充需求，不得少于 {new_req_count} 个
-   - 新需求应该具体、可执行、可验证，避免过于抽象或重复
-4. 避免生成与禁用清单相似的需求
-5. 每个需求条目必须包含详细的功能规格说明，包括：
-   - 功能描述：清晰说明该需求要实现的功能
-   - 使用场景：描述在什么情况下使用该功能
-   - 用户交互流程：说明用户如何操作，系统如何响应
-   - 前置条件：执行该功能前需要满足的条件
-   - 后置条件：执行该功能后系统应达到的状态
-   - 输入输出：说明需要输入的数据和系统输出的结果
-6. 输出格式：每个需求以 "REQ-XXX:" 开头（不要使用Markdown粗体标记**包裹需求ID），后跟详细描述（可以跨多行），使用Markdown格式组织内容
+1. 使用自然流畅的业务语言表述，避免模板化格式
+2. 对于评分<1的现有需求，必须重新生成改进版本，保持使用原ID
+3. 对于评分≥1的现有需求，可以保持不变或轻微优化，保持使用原ID
+4. 新需求必须从 {next_id} 开始，至少生成 {new_req_count} 个
+5. 每个需求条目应使用自然语言详细描述，包含功能、场景、操作流程、前置后置条件等信息，但不要使用结构化的分类标签（如"功能描述："、"使用场景："等），而是用流畅的段落形式表述
+6. 输出格式：每个需求以 "REQ-XXX:" 开头（不要使用Markdown粗体标记**包裹需求ID），后跟自然流畅的详细描述（可以跨多行）
 7. 每个需求之间用 "---" 分隔符明确分隔（在需求详细内容结束后，下一个REQ-XXX之前添加 "---"）
 
-请输出完整的需求清单，包括：
-- **改进后的现有需求**（评分<1的必须改进，使用原ID；评分≥1的可保持不变或优化，使用原ID）
-- **新增的补充需求**（使用新ID，从 {next_id} 开始，至少 {new_req_count} 个）
-每个需求都要包含上述详细说明。"""
+**重要：你只输出新增的需求（使用新ID）和你要改进的需求（使用原ID）**"""
             
             # 记录完整请求内容
             self.logger.debug("完整请求内容:")
-            self.logger.debug(f"  System: {system_message}")
             self.logger.debug(f"  User: {prompt}")
             
             # 始终使用流式响应
@@ -207,7 +130,6 @@ class ReqExploreAgent:
             
             # 构建消息列表用于续接
             messages = [
-                {"role": "system", "content": system_message},
                 {"role": "user", "content": prompt}
             ]
             
@@ -245,6 +167,7 @@ class ReqExploreAgent:
             new_requirements.requirements = existing_requirements.requirements.copy()
             
             added_ids = []
+            updated_ids = []
             lines = content.split("\n")
             i = 0
             current_req_id = None
@@ -267,8 +190,12 @@ class ReqExploreAgent:
                             
                             # 检查是否被禁用
                             if not forbidden_list.is_forbidden(req):
-                                if new_requirements.add(req):
-                                    added_ids.append(current_req_id)
+                                success, is_update = new_requirements.update_or_add(req)
+                                if success:
+                                    if is_update:
+                                        updated_ids.append(current_req_id)
+                                    else:
+                                        added_ids.append(current_req_id)
                             else:
                                 self.logger.debug(f"需求 {current_req_id} 被禁用，已跳过")
                         
@@ -313,8 +240,12 @@ class ReqExploreAgent:
                                 
                                 # 检查是否被禁用
                                 if not forbidden_list.is_forbidden(req):
-                                    if new_requirements.add(req):
-                                        added_ids.append(current_req_id)
+                                    success, is_update = new_requirements.update_or_add(req)
+                                    if success:
+                                        if is_update:
+                                            updated_ids.append(current_req_id)
+                                        else:
+                                            added_ids.append(current_req_id)
                                 else:
                                     self.logger.debug(f"需求 {current_req_id} 被禁用，已跳过")
                         
@@ -347,19 +278,25 @@ class ReqExploreAgent:
                     
                     # 检查是否被禁用
                     if not forbidden_list.is_forbidden(req):
-                        if new_requirements.add(req):
-                            added_ids.append(current_req_id)
+                        success, is_update = new_requirements.update_or_add(req)
+                        if success:
+                            if is_update:
+                                updated_ids.append(current_req_id)
+                            else:
+                                added_ids.append(current_req_id)
                     else:
                         self.logger.debug(f"需求 {current_req_id} 被禁用，已跳过")
             
             existing_ids_after = set(req.id for req in new_requirements.requirements)
             new_ids = existing_ids_after - existing_ids_before
             
-            self.logger.info(f"挖掘完成，新增需求数量: {len(new_ids)}")
-            if new_ids:
-                self.logger.info(f"新增需求ID: {sorted(new_ids)}")
-                req_id_range = f"{min(new_ids)} - {max(new_ids)}" if len(new_ids) > 1 else list(new_ids)[0]
-                self.logger.debug(f"需求ID范围: {req_id_range}")
+            self.logger.info(f"挖掘完成，新增需求数量: {len(added_ids)}, 更新需求数量: {len(updated_ids)}")
+            if added_ids:
+                self.logger.info(f"新增需求ID: {sorted(added_ids)}")
+                req_id_range = f"{min(added_ids)} - {max(added_ids)}" if len(added_ids) > 1 else added_ids[0]
+                self.logger.debug(f"新增需求ID范围: {req_id_range}")
+            if updated_ids:
+                self.logger.info(f"更新需求ID: {sorted(updated_ids)}")
             
             return new_requirements
         

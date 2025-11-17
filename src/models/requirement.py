@@ -28,6 +28,25 @@ class RequirementList(BaseModel):
         self.requirements.append(requirement)
         return True
     
+    def update_or_add(self, requirement: Requirement) -> tuple[bool, bool]:
+        """更新已存在的需求或添加新需求
+        
+        Returns:
+            tuple[bool, bool]: (是否成功处理, 是否为更新操作)
+            - (True, True): 成功更新已存在的需求
+            - (True, False): 成功添加新需求
+        """
+        # 检查是否已存在相同ID的需求
+        for idx, existing_req in enumerate(self.requirements):
+            if existing_req.id == requirement.id:
+                # 更新已存在的需求
+                self.requirements[idx] = requirement
+                return (True, True)
+        
+        # ID不存在，添加新需求
+        self.requirements.append(requirement)
+        return (True, False)
+    
     def get_next_id(self) -> str:
         """获取下一个连续递增的ID"""
         if not self.requirements:

@@ -1,4 +1,5 @@
 """需求解析智能体 (FR-001)"""
+
 from openai import OpenAI
 from ..config import Config
 from ..utils.timer import TimerManager
@@ -8,20 +9,24 @@ from ..utils.streaming import stream_with_continuation
 
 class ReqParseAgent:
     """需求解析智能体：将自然语言需求解析为需求结构"""
-    
+
     def __init__(self, client: OpenAI, timer_manager: TimerManager):
         self.client = client
         self.timer = timer_manager.get_timer("ReqParse")
         self.logger = get_logger("ReqParse")
-    
+
     def parse(self, raw_input: str) -> str:
         """解析自然语言需求为需求结构（Markdown格式）"""
         self.timer.start()
-        
+
         try:
             self.logger.info(f"开始生成需求结构，输入长度: {len(raw_input)} 字符")
-            self.logger.debug(f"输入文本摘要: {raw_input[:200]}..." if len(raw_input) > 200 else f"输入文本: {raw_input}")
-            
+            self.logger.debug(
+                f"输入文本摘要: {raw_input[:200]}..."
+                if len(raw_input) > 200
+                else f"输入文本: {raw_input}"
+            )
+
             # 需求结构生成 Prompt（参考 index.html 的 defaultPrompt）
             requirement_structure_prompt_template = """{{CONTENT}}
 请按以下设定的需求结构架构师的身份对以上内容执行任务。
@@ -80,26 +85,22 @@ class ReqParseAgent:
 
 ## Initialization
 作为需求结构架构师，你必须遵守上述Rules，按照Workflows执行任务。"""
-            
+
             # 替换占位符
-            prompt = requirement_structure_prompt_template.replace("{{CONTENT}}", raw_input)
-            
-            system_message = "你是一个专业的需求分析师和需求结构架构师，擅长将自然语言需求转化为清晰的需求结构。"
-            
+            prompt = requirement_structure_prompt_template.replace(
+                "{{CONTENT}}", raw_input
+            )
+
             # 记录完整请求内容
             self.logger.debug("完整请求内容:")
-            self.logger.debug(f"  System: {system_message}")
             self.logger.debug(f"  User: {prompt}")
-            
+
             # 始终使用流式响应
             self.logger.info("开始流式生成需求结构...")
-            
+
             # 构建消息列表用于续接
-            messages = [
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": prompt}
-            ]
-            
+            messages = [{"role": "user", "content": prompt}]
+
             # 构建API调用基础参数
             base_api_params = {
                 "model": Config.OPENAI_MODEL,
@@ -108,24 +109,24 @@ class ReqParseAgent:
             max_tokens = Config.get_max_tokens()
             if max_tokens is not None:
                 base_api_params["max_tokens"] = max_tokens
-            
+
             # 记录API调用参数
             self.logger.debug(f"API调用基础参数: {base_api_params}")
-            
+
             # 使用统一的流式响应和续接处理
             content = stream_with_continuation(
                 client=self.client,
                 base_api_params=base_api_params,
                 messages=messages,
-                task_name="需求解析"
+                task_name="需求解析",
             )
-            
+
             # 记录完整响应内容
             if content:
                 self.logger.debug("完整响应内容:")
                 for line in content.split("\n"):
                     self.logger.debug(f"  {line}")
-                
+
                 # 清理可能的代码块包裹
                 requirement_structure = content.strip()
                 if requirement_structure.startswith("```"):
@@ -136,16 +137,18 @@ class ReqParseAgent:
                         requirement_structure = "\n".join(lines[1:-1])
                     else:
                         requirement_structure = ""
-                
-                self.logger.info(f"需求结构生成完成，长度: {len(requirement_structure)} 字符")
+
+                self.logger.info(
+                    f"需求结构生成完成，长度: {len(requirement_structure)} 字符"
+                )
                 return requirement_structure
             else:
                 self.logger.warning("API响应为空")
                 return ""
-        
+
         except Exception as e:
             self.logger.error(f"生成需求结构过程中发生错误: {e}", exc_info=True)
             raise
-        
+
         finally:
             self.timer.stop()

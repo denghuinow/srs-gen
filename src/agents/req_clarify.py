@@ -36,10 +36,7 @@ class ReqClarifyAgent:
             # 记录基准SRS信息
             baseline_len = len(baseline_srs)
             self.logger.info(f"基准SRS长度: {baseline_len} 字符")
-            if baseline_srs:
-                baseline_summary = baseline_srs[:500] + "..." if len(baseline_srs) > 500 else baseline_srs
-                self.logger.debug(f"基准SRS摘要: {baseline_summary}")
-            
+           
             results = []
             
             # 批量处理以提高效率
@@ -48,8 +45,8 @@ class ReqClarifyAgent:
                 for req in requirements.requirements
             ])
             
-            system_message = "你是一个专业的需求评审专家，擅长评估需求与基准文档的一致性。"
-            prompt = f"""请对以下需求清单进行一致性评分，对照基准SRS文档。
+            prompt = f"""你是一个专业的需求评审专家，擅长评估需求与基准文档的一致性。
+请对以下需求清单进行一致性评分，对照基准SRS文档。
 
 基准SRS文档（完整）：
 {baseline_srs}
@@ -72,7 +69,6 @@ class ReqClarifyAgent:
             
             # 记录完整请求内容
             self.logger.debug("完整请求内容:")
-            self.logger.debug(f"  System: {system_message}")
             self.logger.debug(f"  User: {prompt}")
             
             # 始终使用流式响应
@@ -80,7 +76,6 @@ class ReqClarifyAgent:
             
             # 构建消息列表用于续接
             messages = [
-                {"role": "system", "content": system_message},
                 {"role": "user", "content": prompt}
             ]
             
