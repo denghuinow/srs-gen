@@ -9,6 +9,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import List, Tuple, Optional
 import time
 from datetime import datetime
+import re
 
 
 def find_matching_baseline(input_file: Path, baseline_dir: Path) -> Optional[Path]:
@@ -33,15 +34,45 @@ def find_matching_baseline(input_file: Path, baseline_dir: Path) -> Optional[Pat
     return None
 
 
+def is_retryable_error(error_msg: str) -> bool:
+    """判断错误是否可重试（网络错误、超时等临时性错误）"""
+    retryable_patterns = [
+        r"Connection reset by peer",
+        r"Connection refused",
+        r"Connection aborted",
+        r"Connection timeout",
+        r"Timeout",
+        r"timeout",
+        r"Network is unreachable",
+        r"No route to host",
+        r"Temporary failure",
+        r"Service temporarily unavailable",
+        r"Too many requests",
+        r"Rate limit",
+        r"429",  # HTTP 429 Too Many Requests
+        r"502",  # HTTP 502 Bad Gateway
+        r"503",  # HTTP 503 Service Unavailable
+        r"504",  # HTTP 504 Gateway Timeout
+    ]
+    
+    error_text = error_msg.lower()
+    for pattern in retryable_patterns:
+        if re.search(pattern, error_text, re.IGNORECASE):
+            return True
+    return False
+
+
 def run_single_task(
     input_file: Path,
     baseline_file: Optional[Path],
     output_base_dir: Path,
     ablation_mode: str,
     max_iterations: Optional[int],
-    extra_args: List[str]
+    extra_args: List[str],
+    max_retries: int = 3,
+    retry_delay: float = 5.0
 ) -> Tuple[str, bool, str]:
-    """执行单个任务"""
+    """执行单个任务，带重试机制"""
     task_name = input_file.stem
     output_dir = output_base_dir / task_name
     
@@ -64,22 +95,44 @@ def run_single_task(
     
     cmd.extend(extra_args)
     
-    # 执行命令
+    # 执行命令，带重试
     start_time = time.time()
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            check=True
-        )
-        elapsed_time = time.time() - start_time
-        return (task_name, True, f"成功 (耗时: {elapsed_time:.2f}秒)")
-    except subprocess.CalledProcessError as e:
-        elapsed_time = time.time() - start_time
-        error_msg = e.stderr if e.stderr else str(e)
-        return (task_name, False, f"失败 (耗时: {elapsed_time:.2f}秒): {error_msg[:200]}")
+    last_error = None
+    
+    for attempt in range(max_retries + 1):  # 0到max_retries，共max_retries+1次尝试
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=True
+            )
+            elapsed_time = time.time() - start_time
+            if attempt > 0:
+                return (task_name, True, f"成功 (耗时: {elapsed_time:.2f}秒, 重试: {attempt}次)")
+            return (task_name, True, f"成功 (耗时: {elapsed_time:.2f}秒)")
+        except subprocess.CalledProcessError as e:
+            elapsed_time = time.time() - start_time
+            # 优先使用 stderr，如果没有则使用 stdout，最后使用异常消息
+            error_msg = e.stderr if e.stderr else (e.stdout if e.stdout else str(e))
+            last_error = error_msg
+            
+            # 判断是否可重试
+            if attempt < max_retries and is_retryable_error(error_msg):
+                # 等待后重试
+                time.sleep(retry_delay)
+                continue
+            else:
+                # 不可重试或已达到最大重试次数
+                if attempt > 0:
+                    return (task_name, False, f"失败 (耗时: {elapsed_time:.2f}秒, 重试: {attempt}次): {error_msg[:200]}")
+                return (task_name, False, f"失败 (耗时: {elapsed_time:.2f}秒): {error_msg[:200]}")
+    
+    # 如果所有重试都失败
+    elapsed_time = time.time() - start_time
+    error_msg = last_error[:200] if last_error else "未知错误"
+    return (task_name, False, f"失败 (耗时: {elapsed_time:.2f}秒, 重试: {max_retries}次): {error_msg}")
 
 
 def main():
@@ -141,10 +194,32 @@ def main():
     )
     
     parser.add_argument(
+        "--files",
+        type=str,
+        nargs="+",
+        default=None,
+        help="指定要处理的文件列表（文件名，可以包含或不包含扩展名）。如果指定，则只处理这些文件"
+    )
+    
+    parser.add_argument(
         "--extra-args",
         type=str,
         nargs=argparse.REMAINDER,
         help="传递给main.py的额外参数"
+    )
+    
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=3,
+        help="失败时的最大重试次数（默认：3）"
+    )
+    
+    parser.add_argument(
+        "--retry-delay",
+        type=float,
+        default=5.0,
+        help="重试前的等待时间（秒，默认：5.0）"
     )
     
     args = parser.parse_args()
@@ -169,11 +244,44 @@ def main():
     
     # 查找所有输入文件
     input_files = []
-    for ext in args.file_extensions:
-        input_files.extend(input_dir.glob(f"*{ext}"))
+    if args.files:
+        # 如果指定了文件列表，只处理这些文件
+        for file_name in args.files:
+            # 尝试直接匹配文件名
+            file_path = input_dir / file_name
+            if file_path.exists() and file_path.is_file():
+                input_files.append(file_path)
+            else:
+                # 尝试匹配文件名（不包含扩展名）
+                file_stem = Path(file_name).stem
+                for ext in args.file_extensions:
+                    candidate = input_dir / f"{file_stem}{ext}"
+                    if candidate.exists() and candidate.is_file():
+                        input_files.append(candidate)
+                        break
+                else:
+                    # 如果还是找不到，尝试模糊匹配
+                    found = False
+                    for ext in args.file_extensions:
+                        for existing_file in input_dir.glob(f"*{ext}"):
+                            if file_stem in existing_file.stem or existing_file.stem in file_stem:
+                                input_files.append(existing_file)
+                                found = True
+                                break
+                        if found:
+                            break
+                    if not found:
+                        print(f"警告：未找到文件：{file_name}", file=sys.stderr)
+    else:
+        # 处理所有匹配扩展名的文件
+        for ext in args.file_extensions:
+            input_files.extend(input_dir.glob(f"*{ext}"))
     
     if not input_files:
-        print(f"警告：在 {input_dir} 中未找到任何输入文件（扩展名：{args.file_extensions}）", file=sys.stderr)
+        if args.files:
+            print(f"错误：未找到任何指定的文件", file=sys.stderr)
+        else:
+            print(f"警告：在 {input_dir} 中未找到任何输入文件（扩展名：{args.file_extensions}）", file=sys.stderr)
         sys.exit(1)
     
     # 去重并排序
@@ -183,6 +291,8 @@ def main():
     print(f"输出目录：{output_base_dir.absolute()}")
     print(f"并行度：{args.parallel}")
     print(f"消融模式：{args.ablation_mode}")
+    print(f"最大重试次数：{args.max_retries}")
+    print(f"重试延迟：{args.retry_delay}秒")
     if baseline_dir:
         print(f"基准目录：{baseline_dir.absolute()}")
     print()
@@ -214,7 +324,9 @@ def main():
                 output_base_dir,
                 args.ablation_mode,
                 args.max_iterations,
-                args.extra_args or []
+                args.extra_args or [],
+                args.max_retries,
+                args.retry_delay
             )
             # 添加输入文件信息到结果
             results.append((result[0], result[1], result[2], input_file))
@@ -235,7 +347,9 @@ def main():
                     output_base_dir,
                     args.ablation_mode,
                     args.max_iterations,
-                    args.extra_args or []
+                    args.extra_args or [],
+                    args.max_retries,
+                    args.retry_delay
                 )
                 future_to_task[future] = (task_name, baseline_file, input_file)
             
@@ -287,6 +401,8 @@ def main():
         f.write(f"输出目录：{output_base_dir.absolute()}\n")
         f.write(f"并行度：{args.parallel}\n")
         f.write(f"消融模式：{args.ablation_mode}\n")
+        f.write(f"最大重试次数：{args.max_retries}\n")
+        f.write(f"重试延迟：{args.retry_delay}秒\n")
         f.write(f"总任务数：{len(results)}\n")
         f.write(f"成功：{success_count}\n")
         f.write(f"失败：{fail_count}\n")
