@@ -158,6 +158,14 @@ REQ-XXX | 评分: <score> | 说明: <简短说明30字内，包含理由和证�
                 if score_val is None:
                     score_val = 0
                 
+                # 验证并限制分数在有效范围内 (-2 到 +2)
+                if score_val > 2:
+                    self.logger.warning(f"需求 {req_id} 的分数 {score_val} 超出上限，限制为 2")
+                    score_val = 2
+                elif score_val < -2:
+                    self.logger.warning(f"需求 {req_id} 的分数 {score_val} 超出下限，限制为 -2")
+                    score_val = -2
+                
                 score_distribution[score_val] = score_distribution.get(score_val, 0) + 1
                 
                 results.append(ClarificationResult(

@@ -407,7 +407,15 @@ class WorkflowOrchestrator:
         
         # 构建并运行工作流
         graph = self.build_graph()
-        final_state = graph.invoke(initial_state)
+        
+        # 计算递归限制：每次迭代需要约4个节点（parse 1次 + explore + clarify + check_convergence），
+        # 加上 generate 节点，再加上一些缓冲
+        max_iterations = initial_state.get("max_iterations", Config.MAX_ITERATIONS)  # type: ignore
+        recursion_limit = max_iterations * 4 + 20  # 安全缓冲
+        
+        # 设置 LangGraph 配置，增加递归限制
+        config = {"recursion_limit": recursion_limit}
+        final_state = graph.invoke(initial_state, config=config)
         
         # 停止计时
         final_state["timer_manager"].get_total_time()
