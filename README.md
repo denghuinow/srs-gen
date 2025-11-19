@@ -94,7 +94,6 @@ python main.py <input> \
 - **对比报告**：消融实验对比信息（默认：`comparison_report.md`），包含：
   - 总需求数
   - 进入最终清单数
-  - 被禁用ID数
   - 各代理耗时汇总
   - 各需求得分历史轨迹概览
 
@@ -117,7 +116,6 @@ srs-gen/
 │   │   └── srs_template.py # SRS模板
 │   └── utils/             # 工具函数
 │       ├── timer.py       # 耗时统计
-│       ├── forbidden_list.py # 禁用清单
 │       ├── score_history.py # 得分历史
 │       └── comparison.py  # 对比报告
 └── tests/                 # 测试文件

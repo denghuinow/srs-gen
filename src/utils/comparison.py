@@ -13,7 +13,6 @@ class ComparisonReporter:
         requirements: List[Requirement],
         score_history: ScoreHistory,
         timer_manager: TimerManager,
-        forbidden_count: int,
         ablation_mode: str
     ) -> str:
         """生成对比报告"""
@@ -26,7 +25,6 @@ class ComparisonReporter:
 ## 需求统计
 - 总需求数: {score_history.get_total_requirements()}
 - 进入最终清单数: {score_history.get_final_requirements(requirements)}
-- 被禁用ID数: {forbidden_count}
 
 ## 各代理耗时汇总
 """

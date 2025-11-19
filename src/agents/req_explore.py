@@ -4,7 +4,6 @@ from openai import OpenAI
 from ..config import Config
 from ..models.requirement import Requirement, RequirementList
 from ..utils.timer import TimerManager
-from ..utils.forbidden_list import ForbiddenList
 from ..utils.logger import get_logger
 from ..utils.streaming import stream_with_continuation
 
@@ -21,7 +20,6 @@ class ReqExploreAgent:
         self,
         raw_input: str,
         existing_requirements: RequirementList,
-        forbidden_list: ForbiddenList,
         iteration: int,
         baseline_requirement_structure: str = "",
     ) -> RequirementList:
@@ -63,10 +61,6 @@ class ReqExploreAgent:
                     self.logger.debug(
                         f"  {req_info['id']}: 评分 {req_info['score']} | 内容预览: {req_text_preview}"
                     )
-
-            if forbidden_list.forbidden_ids:
-                self.logger.info(f"禁用需求ID数量: {len(forbidden_list.forbidden_ids)}")
-                self.logger.debug(f"禁用需求ID列表: {forbidden_list.forbidden_ids}")
 
             # 获取下一个可用ID
             next_id = existing_requirements.get_next_id()
@@ -170,22 +164,23 @@ class ReqExploreAgent:
                     if current_req_id and current_req_text_lines:
                         req_text = "\n".join(current_req_text_lines).strip()
                         if req_text:
+                            # 检查原需求的score，如果score == 2则保留，否则设为None以便重新评分
+                            original_score = None
+                            for existing_req in existing_requirements.requirements:
+                                if existing_req.id == current_req_id and existing_req.score == 2:
+                                    original_score = 2
+                                    break
+                            
                             req = Requirement(
-                                id=current_req_id, text=req_text, iteration=iteration
+                                id=current_req_id, text=req_text, iteration=iteration, score=original_score
                             )
 
-                            # 检查是否被禁用
-                            if not forbidden_list.is_forbidden(req):
-                                success, is_update = new_requirements.update_or_add(req)
-                                if success:
-                                    if is_update:
-                                        updated_ids.append(current_req_id)
-                                    else:
-                                        added_ids.append(current_req_id)
-                            else:
-                                self.logger.debug(
-                                    f"需求 {current_req_id} 被禁用，已跳过"
-                                )
+                            success, is_update = new_requirements.update_or_add(req)
+                            if success:
+                                if is_update:
+                                    updated_ids.append(current_req_id)
+                                else:
+                                    added_ids.append(current_req_id)
 
                         current_req_id = None
                         current_req_text_lines = []
@@ -225,26 +220,28 @@ class ReqExploreAgent:
                         if current_req_id and current_req_text_lines:
                             req_text = "\n".join(current_req_text_lines).strip()
                             if req_text:
+                                # 检查原需求的score，如果score == 2则保留，否则设为None以便重新评分
+                                original_score = None
+                                for existing_req in existing_requirements.requirements:
+                                    if existing_req.id == current_req_id and existing_req.score == 2:
+                                        original_score = 2
+                                        break
+                                
                                 req = Requirement(
                                     id=current_req_id,
                                     text=req_text,
                                     iteration=iteration,
+                                    score=original_score
                                 )
 
-                                # 检查是否被禁用
-                                if not forbidden_list.is_forbidden(req):
-                                    success, is_update = new_requirements.update_or_add(
-                                        req
-                                    )
-                                    if success:
-                                        if is_update:
-                                            updated_ids.append(current_req_id)
-                                        else:
-                                            added_ids.append(current_req_id)
-                                else:
-                                    self.logger.debug(
-                                        f"需求 {current_req_id} 被禁用，已跳过"
-                                    )
+                                success, is_update = new_requirements.update_or_add(
+                                    req
+                                )
+                                if success:
+                                    if is_update:
+                                        updated_ids.append(current_req_id)
+                                    else:
+                                        added_ids.append(current_req_id)
 
                         # 开始新的需求
                         current_req_id = req_id
@@ -267,20 +264,23 @@ class ReqExploreAgent:
             if current_req_id and current_req_text_lines:
                 req_text = "\n".join(current_req_text_lines).strip()
                 if req_text:
+                    # 检查原需求的score，如果score == 2则保留，否则设为None以便重新评分
+                    original_score = None
+                    for existing_req in existing_requirements.requirements:
+                        if existing_req.id == current_req_id and existing_req.score == 2:
+                            original_score = 2
+                            break
+                    
                     req = Requirement(
-                        id=current_req_id, text=req_text, iteration=iteration
+                        id=current_req_id, text=req_text, iteration=iteration, score=original_score
                     )
 
-                    # 检查是否被禁用
-                    if not forbidden_list.is_forbidden(req):
-                        success, is_update = new_requirements.update_or_add(req)
-                        if success:
-                            if is_update:
-                                updated_ids.append(current_req_id)
-                            else:
-                                added_ids.append(current_req_id)
-                    else:
-                        self.logger.debug(f"需求 {current_req_id} 被禁用，已跳过")
+                    success, is_update = new_requirements.update_or_add(req)
+                    if success:
+                        if is_update:
+                            updated_ids.append(current_req_id)
+                        else:
+                            added_ids.append(current_req_id)
 
             existing_ids_after = set(req.id for req in new_requirements.requirements)
             new_ids = existing_ids_after - existing_ids_before

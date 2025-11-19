@@ -5,7 +5,6 @@ from openai import OpenAI
 from ..config import Config
 from ..models.requirement import Requirement, RequirementList, ClarificationResult
 from ..utils.timer import TimerManager
-from ..utils.forbidden_list import ForbiddenList
 from ..utils.logger import get_logger
 from ..utils.streaming import stream_with_continuation
 
@@ -27,13 +26,13 @@ class ReqClarifyAgent:
         self.timer.start()
         
         try:
-            # 筛选出需要评分的需求（score为None的，即新增或修改的）
-            needs_scoring = [req for req in requirements.requirements if req.score is None]
-            already_scored = [req for req in requirements.requirements if req.score is not None]
+            # 筛选出需要评分的需求（score为None的，或score < 2的，即新增、修改或需要重新评分的）
+            needs_scoring = [req for req in requirements.requirements if req.score is None or (req.score is not None and req.score < 2)]
+            already_scored = [req for req in requirements.requirements if req.score is not None and req.score >= 2]
             
             self.logger.info(f"开始澄清评分，总需求数量: {len(requirements.requirements)}")
-            self.logger.info(f"  需要评分（新增/修改）: {len(needs_scoring)}")
-            self.logger.info(f"  已评分（跳过）: {len(already_scored)}")
+            self.logger.info(f"  需要评分（新增/修改/小于2分）: {len(needs_scoring)}")
+            self.logger.info(f"  已评分且>=2分（跳过）: {len(already_scored)}")
             
             if not needs_scoring:
                 self.logger.info("没有需要评分的新增或修改需求，跳过澄清阶段")
@@ -183,9 +182,9 @@ REQ-XXX | 评分: <score> | 说明: <简短说明30字内，引用基准SRS中�
             self.logger.info(f"  -1 (轻微冲突): {score_distribution[-1]}")
             self.logger.info(f"  -2 (明确冲突): {score_distribution[-2]}")
             
-            removed_count = score_distribution[-1] + score_distribution[-2]
-            if removed_count > 0:
-                self.logger.info(f"将被移除的需求数量: {removed_count}")
+            negative_count = score_distribution[-1] + score_distribution[-2]
+            if negative_count > 0:
+                self.logger.info(f"负分需求数量: {negative_count}（将在下一轮迭代中改进）")
             
             return results
         

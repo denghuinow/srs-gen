@@ -1,7 +1,6 @@
 """工作流状态管理"""
 from typing import TypedDict, List, Optional
 from ..models.requirement import RequirementList
-from ..utils.forbidden_list import ForbiddenList
 from ..utils.score_history import ScoreHistory
 from ..utils.timer import TimerManager
 
@@ -12,7 +11,6 @@ class WorkflowState(TypedDict, total=False):
     baseline_srs: str
     baseline_gend_srs: str  # 基准生成的SRS文件内容
     requirements: RequirementList
-    forbidden_list: ForbiddenList
     score_history: ScoreHistory
     timer_manager: TimerManager
     iteration_count: int

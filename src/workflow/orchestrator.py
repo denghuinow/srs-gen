@@ -82,7 +82,6 @@ class WorkflowOrchestrator:
             state["requirements"] = agent.explore(
                 raw_input,
                 state["requirements"],
-                state["forbidden_list"],
                 state["iteration_count"],
                 baseline_requirement_structure
             )
@@ -222,7 +221,6 @@ class WorkflowOrchestrator:
         # 应用评分结果
         score_map = {r.req_id: r for r in results}
         new_requirements = RequirementList()
-        forbidden_req_ids = []
         
         for req in state["requirements"].requirements:
             if req.id in score_map:
@@ -240,17 +238,16 @@ class WorkflowOrchestrator:
                     result.evidence
                 )
                 
-                # 只有-2条目加入禁用清单，但不移除
-                # 保留所有需求（包括负分），以便在下一轮迭代中改进
-                if result.score == -2:
-                    state["forbidden_list"].add(req)
-                    forbidden_req_ids.append(req.id)
-                
-                # 所有需求都保留（包括负分）
+                # 所有需求都保留（包括负分），以便在下一轮迭代中改进
                 if not new_requirements.add(req):
                     self.logger.warning(f"需求 {req.id} 在澄清阶段重复添加，已跳过")
             else:
-                # 没有评分结果的需求保留（可能是新生成的）
+                # 没有评分结果的需求保留
+                # 如果原需求 score < 2，将 score 设为 None，以便下次迭代时重新评分
+                if req.score is not None and req.score < 2:
+                    old_score = req.score
+                    req.score = None
+                    self.logger.debug(f"需求 {req.id} 原评分 {old_score} < 2，但未获得新评分，将 score 设为 None 以便下次重新评分")
                 if not new_requirements.add(req):
                     self.logger.warning(f"需求 {req.id} 在澄清阶段重复添加，已跳过")
         
@@ -259,10 +256,6 @@ class WorkflowOrchestrator:
         # 记录澄清后的需求ID集合
         req_ids_after = set(req.id for req in state["requirements"].requirements)
         self.logger.debug(f"[迭代 {state['iteration_count']}] 澄清后需求ID集合: {sorted(req_ids_after)}")
-        
-        # 记录禁用清单的需求
-        if forbidden_req_ids:
-            self.logger.info(f"[迭代 {state['iteration_count']}] 加入禁用清单的需求: {sorted(forbidden_req_ids)}")
         
         # 统计负分需求数量（用于日志）
         negative_count = sum(1 for req in state["requirements"].requirements 
@@ -381,7 +374,6 @@ class WorkflowOrchestrator:
     ) -> dict:
         """运行工作流"""
         from ..utils.timer import TimerManager
-        from ..utils.forbidden_list import ForbiddenList
         from ..utils.score_history import ScoreHistory
         from ..models.requirement import RequirementList
         
@@ -393,7 +385,6 @@ class WorkflowOrchestrator:
             "baseline_srs": baseline_srs,
             "baseline_gend_srs": baseline_gend_srs,
             "requirements": RequirementList(),
-            "forbidden_list": ForbiddenList(),
             "score_history": ScoreHistory(),
             "timer_manager": TimerManager(),
             "iteration_count": 0,
@@ -426,7 +417,6 @@ class WorkflowOrchestrator:
             final_state["requirements"].requirements,
             final_state["score_history"],
             final_state["timer_manager"],
-            final_state["forbidden_list"].get_count(),
             ablation_mode
         )
         
