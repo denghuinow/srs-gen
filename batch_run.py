@@ -65,6 +65,7 @@ def is_retryable_error(error_msg: str) -> bool:
 def run_single_task(
     input_file: Path,
     baseline_file: Optional[Path],
+    baseline_gend_file: Optional[Path],
     output_base_dir: Path,
     ablation_mode: str,
     max_iterations: Optional[int],
@@ -89,6 +90,9 @@ def run_single_task(
     
     if baseline_file:
         cmd.extend(["--baseline-srs", str(baseline_file)])
+    
+    if baseline_gend_file:
+        cmd.extend(["--baseline-gend-srs", str(baseline_gend_file)])
     
     if max_iterations:
         cmd.extend(["--max-iterations", str(max_iterations)])
@@ -154,6 +158,13 @@ def main():
         type=str,
         default="",
         help="基准文档目录路径（可选，如果不指定则不会使用基准文档）"
+    )
+    
+    parser.add_argument(
+        "--baseline-gend-dir",
+        type=str,
+        default="",
+        help="基准生成的SRS文档目录路径（可选，如果不指定则不会使用基准生成的SRS文档）"
     )
     
     parser.add_argument(
@@ -238,6 +249,14 @@ def main():
             print(f"错误：基准目录不存在或不是目录：{baseline_dir}", file=sys.stderr)
             sys.exit(1)
     
+    # 验证基准生成的SRS目录（如果指定）
+    baseline_gend_dir = None
+    if args.baseline_gend_dir:
+        baseline_gend_dir = Path(args.baseline_gend_dir)
+        if not baseline_gend_dir.exists() or not baseline_gend_dir.is_dir():
+            print(f"错误：基准生成的SRS目录不存在或不是目录：{baseline_gend_dir}", file=sys.stderr)
+            sys.exit(1)
+    
     # 创建输出目录
     output_base_dir = Path(args.output_dir)
     output_base_dir.mkdir(parents=True, exist_ok=True)
@@ -295,6 +314,8 @@ def main():
     print(f"重试延迟：{args.retry_delay}秒")
     if baseline_dir:
         print(f"基准目录：{baseline_dir.absolute()}")
+    if baseline_gend_dir:
+        print(f"基准生成的SRS目录：{baseline_gend_dir.absolute()}")
     print()
     
     # 准备任务列表
@@ -306,7 +327,13 @@ def main():
             if not baseline_file:
                 print(f"警告：未找到 {input_file.name} 的匹配基准文档", file=sys.stderr)
         
-        tasks.append((input_file, baseline_file))
+        baseline_gend_file = None
+        if baseline_gend_dir:
+            baseline_gend_file = find_matching_baseline(input_file, baseline_gend_dir)
+            if not baseline_gend_file:
+                print(f"警告：未找到 {input_file.name} 的匹配基准生成的SRS文档", file=sys.stderr)
+        
+        tasks.append((input_file, baseline_file, baseline_gend_file))
     
     # 执行任务
     start_time = time.time()
@@ -315,12 +342,13 @@ def main():
     if args.parallel == 1:
         # 串行执行
         print("串行执行模式...")
-        for input_file, baseline_file in tasks:
+        for input_file, baseline_file, baseline_gend_file in tasks:
             task_name = input_file.stem
             print(f"[{datetime.now().strftime('%H:%M:%S')}] 开始处理：{task_name}")
             result = run_single_task(
                 input_file,
                 baseline_file,
+                baseline_gend_file,
                 output_base_dir,
                 args.ablation_mode,
                 args.max_iterations,
@@ -338,12 +366,13 @@ def main():
         with ProcessPoolExecutor(max_workers=args.parallel) as executor:
             # 提交所有任务
             future_to_task = {}
-            for input_file, baseline_file in tasks:
+            for input_file, baseline_file, baseline_gend_file in tasks:
                 task_name = input_file.stem
                 future = executor.submit(
                     run_single_task,
                     input_file,
                     baseline_file,
+                    baseline_gend_file,
                     output_base_dir,
                     args.ablation_mode,
                     args.max_iterations,
@@ -351,19 +380,20 @@ def main():
                     args.max_retries,
                     args.retry_delay
                 )
-                future_to_task[future] = (task_name, baseline_file, input_file)
+                future_to_task[future] = (task_name, baseline_file, baseline_gend_file, input_file)
             
             # 处理完成的任务
             completed = 0
             for future in as_completed(future_to_task):
                 completed += 1
                 result = future.result()
-                task_name, baseline_file, input_file = future_to_task[future]
+                task_name, baseline_file, baseline_gend_file, input_file = future_to_task[future]
                 # 添加输入文件信息到结果
                 results.append((result[0], result[1], result[2], input_file))
                 status = "✓" if result[1] else "✗"
                 baseline_info = f" (基准: {baseline_file.name})" if baseline_file else ""
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] [{completed}/{len(tasks)}] {status} {result[0]}: {result[2]}{baseline_info}")
+                baseline_gend_info = f" (基准生成: {baseline_gend_file.name})" if baseline_gend_file else ""
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] [{completed}/{len(tasks)}] {status} {result[0]}: {result[2]}{baseline_info}{baseline_gend_info}")
     
     # 输出统计信息
     total_time = time.time() - start_time
@@ -398,6 +428,8 @@ def main():
         f.write(f"输入目录：{input_dir.absolute()}\n")
         if baseline_dir:
             f.write(f"基准目录：{baseline_dir.absolute()}\n")
+        if baseline_gend_dir:
+            f.write(f"基准生成的SRS目录：{baseline_gend_dir.absolute()}\n")
         f.write(f"输出目录：{output_base_dir.absolute()}\n")
         f.write(f"并行度：{args.parallel}\n")
         f.write(f"消融模式：{args.ablation_mode}\n")

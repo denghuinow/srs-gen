@@ -36,6 +36,14 @@ class ReqExploreAgent:
                 if len(raw_input) > 300
                 else f"用户原始需求: {raw_input}"
             )
+            
+            if baseline_requirement_structure:
+                self.logger.info(f"基准需求语义单元长度: {len(baseline_requirement_structure)} 字符")
+                self.logger.debug(
+                    f"基准需求语义单元预览: {baseline_requirement_structure[:300]}..."
+                    if len(baseline_requirement_structure) > 300
+                    else f"基准需求语义单元: {baseline_requirement_structure}"
+                )
 
             # 获取用于探索的现有需求（包含id、score和text，不包含reason - FR-013）
             existing_for_explore = existing_requirements.get_for_explore()
@@ -60,18 +68,8 @@ class ReqExploreAgent:
                 self.logger.info(f"禁用需求ID数量: {len(forbidden_list.forbidden_ids)}")
                 self.logger.debug(f"禁用需求ID列表: {forbidden_list.forbidden_ids}")
 
-            # 获取当前最大需求ID和下一个可用ID
+            # 获取下一个可用ID
             next_id = existing_requirements.get_next_id()
-            max_id = (
-                existing_requirements.requirements[-1].id
-                if existing_requirements.requirements
-                else "REQ-000"
-            )
-
-            # 统计需要改进的需求（评分<=0）
-            needs_improvement = [
-                req_info for req_info in existing_for_explore if req_info["score"] is not None and req_info["score"] <= 0
-            ]
 
             # 使用配置的固定值作为新需求数量
             new_req_count = Config.NEW_REQUIREMENTS_PER_ITERATION
@@ -91,26 +89,27 @@ class ReqExploreAgent:
 
             prompt = f"""你是一个专业的软件工程需求分析师，擅长挖掘和补充系统需求。
 基于以下信息完成两个任务：
-1. **改进现有需求**：对于评分<=0的需求，必须重新生成改进版本，使用相同的ID
-2. **补充新需求**：基于用户原始需求自由挖掘和补充新需求，必须生成至少 {new_req_count} 个新需求
+1. **改进已分析需求**：对于评分<=0的需求，必须重新生成改进版本，使用相同的ID
+2. **补充新增需求**：基于客户原始需求文档自由挖掘和补充新需求，必须生成至少 {new_req_count} 个新增需求
 
-**用户原始需求：**
+**客户原始需求文档：**
 {raw_input}
+**需求分析参考基准：**
 {baseline_requirement_structure}
-
-**完整需求清单：**
+**已分析需求清单（含评分）：**
 {requirements_list}
 
 要求：
-1. 使用自然流畅的业务语言表述，避免模板化格式
-2. 对于评分<=0的现有需求，必须重新生成改进版本，保持使用原ID
-3. 对于评分>0的现有需求，可以保持不变或轻微优化，保持使用原ID
-4. 新需求必须从 {next_id} 开始，至少生成 {new_req_count} 个
-5. 每个需求条目应使用自然语言详细描述，包含功能、场景、操作流程、前置后置条件等信息，但不要使用结构化的分类标签（如"功能描述："、"使用场景："等），而是用流畅的段落形式表述
-6. 输出格式：每个需求以 "REQ-XXX:" 开头（不要使用Markdown粗体标记**包裹需求ID），后跟自然流畅的详细描述（可以跨多行）
-7. 每个需求之间用 "---" 分隔符明确分隔（在需求详细内容结束后，下一个REQ-XXX之前添加 "---"）
+1. **完整覆盖原则**：生成的需求清单必须完整覆盖客户原始需求文档中的所有内容点、功能点、场景和约束条件。请仔细分析客户原始需求文档，确保每个关键要素都有对应的需求条目体现，不能遗漏任何重要内容。
+2. 使用自然流畅的业务语言表述，避免模板化格式
+3. 对于评分<=0的已分析需求，必须重新生成改进版本，保持使用原ID
+4. 对于评分>0的已分析需求，可以保持不变或轻微优化，保持使用原ID
+5. 新增需求必须从 {next_id} 开始，至少生成 {new_req_count} 个
+6. 每个需求条目应使用自然语言详细描述，包含功能、场景、操作流程、前置后置条件等信息，但不要使用结构化的分类标签（如"功能描述："、"使用场景："等），而是用流畅的段落形式表述
+7. 输出格式：每个需求以 "REQ-XXX:" 开头（不要使用Markdown粗体标记**包裹需求ID），后跟自然流畅的详细描述（可以跨多行）
+8. 每个需求之间用 "---" 分隔符明确分隔（在需求详细内容结束后，下一个REQ-XXX之前添加 "---"）
 
-**重要：你只输出新增的需求（使用新ID）和你要改进的需求（使用原ID）**"""
+**重要：你只输出新增的需求（使用新ID）和你要改进的需求（使用原ID）。在生成新增需求时，请确保完整覆盖客户原始需求文档的所有内容，并在此基础上挖掘扩充相关需求。**"""
 
             # 记录完整请求内容
             self.logger.debug("完整请求内容:")

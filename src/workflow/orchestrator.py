@@ -68,10 +68,10 @@ class WorkflowOrchestrator:
         self.logger.debug(f"[迭代 {state['iteration_count']}] 挖掘前需求ID集合: {sorted(req_ids_before)}")
 
         if self.ablation_mode == "no-explore-clarify":
-            requirement_structure = state.get("requirement_structure", "")  # type: ignore
             self.logger.info(
                 f"[迭代 {state['iteration_count']}] no-explore-clarify 模式：跳过 ReqExplore，直接映射需求结构"
             )
+            requirement_structure = state.get("requirement_structure", "")  # type: ignore
             state["requirements"] = self._build_requirements_from_structure(
                 requirement_structure,
                 raw_input,
