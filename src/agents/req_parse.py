@@ -8,86 +8,50 @@ from ..utils.streaming import stream_with_continuation
 
 
 class ReqParseAgent:
-    """需求解析智能体：将自然语言需求解析为需求结构"""
+    """需求解析智能体：将自然语言需求解析为需求语义单元"""
 
     def __init__(self, client: OpenAI, timer_manager: TimerManager):
         self.client = client
         self.timer = timer_manager.get_timer("ReqParse")
         self.logger = get_logger("ReqParse")
 
-    def parse(self, raw_input: str) -> str:
-        """解析自然语言需求为需求结构（Markdown格式）"""
+    def parse(self, raw_input: str, input_type: str = "用户需求") -> str:
+        """解析自然语言需求为需求语义单元（Markdown格式）
+        
+        Args:
+            raw_input: 要解析的输入文本
+            input_type: 输入类型标识，用于日志记录（默认："用户需求"）
+        """
         self.timer.start()
 
         try:
-            self.logger.info(f"开始生成需求结构，输入长度: {len(raw_input)} 字符")
+            self.logger.info(f"开始生成需求语义单元（{input_type}），输入长度: {len(raw_input)} 字符")
             self.logger.debug(
                 f"输入文本摘要: {raw_input[:200]}..."
                 if len(raw_input) > 200
                 else f"输入文本: {raw_input}"
             )
 
-            # 需求结构生成 Prompt（参考 index.html 的 defaultPrompt）
-            requirement_structure_prompt_template = """{{CONTENT}}
-请按以下设定的需求结构架构师的身份对以上内容执行任务。
+            # 需求语义单元生成 Prompt（参考 index.html 的 defaultPrompt）
+            requirement_semantic_unit_prompt_template = """{{CONTENT}}
+请根据以上软件需求规格说明书（SRS）文档，识别并提取其中的核心内容：
 
-# Role: 需求结构架构师
+1. 功能需求：列出所有明确的功能模块及其具体描述，包括输入输出参数、处理逻辑和性能指标
+2. 非功能需求：提取所有性能要求、安全要求、可用性要求和可靠性指标，并量化具体数值
+3. 约束条件：识别所有技术约束、业务约束和法规约束，包括具体的版本要求、兼容性标准和合规规范
+4. 业务规则：提取所有业务逻辑规则、数据验证规则和流程控制规则，明确触发条件和执行结果
 
-## Profile
-- description: 精通信息结构提取与层次关系分析，能够将复杂文本内容转化为清晰、分层的需求结构格式，便于阅读与理解。
-- background: 拥有丰富的信息架构设计经验，熟悉多种内容结构优化方法，擅长运用Markdown及视觉元素增强内容表现力。
-- personality: 细致严谨，逻辑清晰，注重条理性与用户体验，表达简洁明了。
-- expertise: 信息架构设计、内容层次化、结构化表达、Markdown需求结构制作。
-- target_audience: 内容编辑人员、文档撰写者、项目管理者、学习者及需要清晰信息结构的用户群体。
-
-## Skills
-
-1. 信息结构设计
-   - 层级划分: 根据内容逻辑精准划分多层级结构
-   - 关系梳理: 明确主次、分支及关联节点
-   - 内容细化: 优化内容条目，细化分点展开
-   - 逻辑优化: 保持结构简洁且易读
-
-2. Markdown及可视化表达
-   - 需求结构格式制作: 灵活使用#、##、###等级标题表达层次
-   - 列表运用: 以条目列表形式呈现节点内容
-   - 语言保持: 保持原文语言与用词
-
-3. Rules
-
-1. 基本原则：
-   - 原文尊重：所有内容必须保留原文句子，杜绝改写或删减关键内容
-   - 结构清晰：层级分明，结构简洁，避免内容堆叠不清晰
-   - 语言一致：输出语言应与原文本主要语言保持一致
-
-
-2. 行为准则：
-   - 不添不减：不得添加任何解释、观点或额外信息
-   - 句式优化：适度调整句式以提升表达通顺度和条理明晰
-   - 内容拆分：长句或内容过多时合理拆分并保持逻辑完整
-   - 专业严谨：坚持专业风格，避免模糊和歧义表述
-
-
-3. 限制条件：
-   - 不允许自创内容：不加入个人见解或未出现的信息
-   - 禁止格式错误：排版清晰，禁止Markdown语法错误
-   - 中心主题限制：中心主题字数限制10个字左右
-   - 层级限制：最少3级，层级数可根据内容合理扩展无上限
-
-## Workflows
-
-- 目标: 将原始文本内容转化为清晰分层的需求结构Markdown格式，便于直接阅读和内容解析
-- 步骤 1: 彻底阅读并理解原始内容，分析其内在逻辑和层级关系
-- 步骤 2: 按照层级使用#标题标记，条目采用列表形式排列，确保不少于三级层级
-- 步骤 3: 对长句进行分点拆解，调整句式增强表述清晰度
-- 步骤 4: 最终输出为纯Markdown格式，只输出 Markdown文本本体，不要使用代码块包裹。
-- 预期结果: 输出符合规范的Markdown格式需求结构文本，层级明晰，内容完整，语言统一，无任何附加解释或内容
-
-## Initialization
-作为需求结构架构师，你必须遵守上述Rules，按照Workflows执行任务。"""
+要求：
+- 每个内容项需包含：类型、描述、优先级、关联关系和验证标准
+- 对于模糊的需求描述，需基于行业最佳实践补充具体实现细节和量化指标
+- 识别需求间的依赖关系，建立内容项间的关联映射
+- 不要使用JSON格式输出结果
+- 在输出中避免使用"语义单元"及相关表述
+- 直接开始输出提取结果，不要使用"根据提供的软件需求规格说明书（SRS），以下是提取的核心内容，按照要求的结构化文本格式进行组织"等类似的开场白
+- 不要使用固定的结构化输出格式，如"名称："、"类型："、"详细描述："等标签化的段落结构，而是采用自然流畅的段落描述方式"""
 
             # 替换占位符
-            prompt = requirement_structure_prompt_template.replace(
+            prompt = requirement_semantic_unit_prompt_template.replace(
                 "{{CONTENT}}", raw_input
             )
 
@@ -96,7 +60,7 @@ class ReqParseAgent:
             self.logger.debug(f"  User: {prompt}")
 
             # 始终使用流式响应
-            self.logger.info("开始流式生成需求结构...")
+            self.logger.info("开始流式生成需求语义单元...")
 
             # 构建消息列表用于续接
             messages = [{"role": "user", "content": prompt}]
@@ -118,7 +82,7 @@ class ReqParseAgent:
                 client=self.client,
                 base_api_params=base_api_params,
                 messages=messages,
-                task_name="需求解析",
+                task_name="需求语义单元解析",
             )
 
             # 记录完整响应内容
@@ -128,26 +92,26 @@ class ReqParseAgent:
                     self.logger.debug(f"  {line}")
 
                 # 清理可能的代码块包裹
-                requirement_structure = content.strip()
-                if requirement_structure.startswith("```"):
+                requirement_semantic_unit = content.strip()
+                if requirement_semantic_unit.startswith("```"):
                     # 移除代码块标记
-                    lines = requirement_structure.split("\n")
+                    lines = requirement_semantic_unit.split("\n")
                     # 移除第一行和最后一行（代码块标记）
                     if len(lines) > 2:
-                        requirement_structure = "\n".join(lines[1:-1])
+                        requirement_semantic_unit = "\n".join(lines[1:-1])
                     else:
-                        requirement_structure = ""
+                        requirement_semantic_unit = ""
 
                 self.logger.info(
-                    f"需求结构生成完成，长度: {len(requirement_structure)} 字符"
+                    f"需求语义单元生成完成，长度: {len(requirement_semantic_unit)} 字符"
                 )
-                return requirement_structure
+                return requirement_semantic_unit
             else:
                 self.logger.warning("API响应为空")
                 return ""
 
         except Exception as e:
-            self.logger.error(f"生成需求结构过程中发生错误: {e}", exc_info=True)
+            self.logger.error(f"生成需求语义单元过程中发生错误: {e}", exc_info=True)
             raise
 
         finally:

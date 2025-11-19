@@ -87,8 +87,9 @@ class ClarificationResult(BaseModel):
     """澄清评分结果"""
     req_id: str
     score: int = Field(..., ge=-2, le=2, description="评分 (-2到+2)")
-    reason: str = Field(..., max_length=60, description="评分理由，不超过60字")
+    reason: str = Field(..., max_length=30, description="评分说明，包含理由和证据关键词，不超过30字")
     evidence: Optional[str] = Field(
         default=None,
-        description="引用的基准证据信息，用于审计"
+        max_length=30,
+        description="引用的基准证据信息（已合并到reason中，保留字段以兼容）"
     )

@@ -23,14 +23,24 @@ class ReqClarifyAgent:
         requirements: RequirementList,
         baseline_srs: str
     ) -> List[ClarificationResult]:
-        """对需求清单进行澄清评分"""
+        """对需求清单进行澄清评分，只对新增和修改的需求（score为None）进行评分"""
         self.timer.start()
         
         try:
-            self.logger.info(f"开始澄清评分，待评分需求数量: {len(requirements.requirements)}")
+            # 筛选出需要评分的需求（score为None的，即新增或修改的）
+            needs_scoring = [req for req in requirements.requirements if req.score is None]
+            already_scored = [req for req in requirements.requirements if req.score is not None]
             
-            # 记录需求ID列表
-            req_ids = [req.id for req in requirements.requirements]
+            self.logger.info(f"开始澄清评分，总需求数量: {len(requirements.requirements)}")
+            self.logger.info(f"  需要评分（新增/修改）: {len(needs_scoring)}")
+            self.logger.info(f"  已评分（跳过）: {len(already_scored)}")
+            
+            if not needs_scoring:
+                self.logger.info("没有需要评分的新增或修改需求，跳过澄清阶段")
+                return []
+            
+            # 记录需要评分的需求ID列表
+            req_ids = [req.id for req in needs_scoring]
             self.logger.debug(f"待评分需求ID: {req_ids}")
             
             # 记录基准SRS信息
@@ -39,31 +49,25 @@ class ReqClarifyAgent:
            
             results = []
             
-            # 批量处理以提高效率
+            # 批量处理以提高效率，只处理需要评分的需求
             requirements_text = "\n".join([
                 f"{req.id}: {req.text}"
-                for req in requirements.requirements
+                for req in needs_scoring
             ])
             
-            prompt = f"""你是一个专业的需求评审专家，擅长评估需求与基准文档的一致性。
-请对以下需求清单进行一致性评分，对照基准SRS文档。
+            prompt = f"""评估需求与基准SRS的一致性，给出评分。
 
-基准SRS文档（完整）：
+基准SRS：
 {baseline_srs}
 
 需求清单：
 {requirements_text}
 
-要求：
-1. 对每条需求给出一致性评分，评分集为 {{+2, +1, 0, -1, -2}}
-   - +2: 与基准SRS高度一致，完全符合
-   - +1: 与基准SRS基本一致，略有补充
-   - 0: 与基准SRS无关或中性
-   - -1: 与基准SRS存在轻微冲突
-   - -2: 与基准SRS明确冲突，必须禁用
-2. 提供不超过60字的评分理由
-3. 为每条需求提供不超过80字的证据引用，可包含章节标题、原文摘录或页码提示
-4. 输出格式：每行一个结果，格式为 "REQ-XXX | 评分: <score> | 理由: <text> | 证据: <evidence>"
+评分规则：
++2: 高度一致  +1: 基本一致  0: 中性  -1: 轻微冲突  -2: 明确冲突
+
+输出格式（每行一条）：
+REQ-XXX | 评分: <score> | 说明: <简短说明30字内，包含理由和证据关键词>
 
 请逐条评分。"""
             
@@ -128,8 +132,7 @@ class ReqClarifyAgent:
                     continue
                 
                 score_val = None
-                reason = ""
-                evidence = ""
+                reason_parts = []
                 
                 for part in parts[1:]:
                     normalized = part.replace("：", ":").strip()
@@ -138,12 +141,19 @@ class ReqClarifyAgent:
                         match = re.search(r"[-+]?\d+", normalized)
                         if match:
                             score_val = int(match.group())
-                    elif lower.startswith("理由"):
+                    elif lower.startswith("说明"):
+                        # 新格式：直接使用说明
                         reason_text = normalized.split(":", 1)[-1].strip()
-                        reason = reason_text[:60]
-                    elif lower.startswith("证据"):
-                        evidence_text = normalized.split(":", 1)[-1].strip()
-                        evidence = evidence_text[:80]
+                        reason_parts = [reason_text[:30]]
+                        break  # 说明字段优先级最高，找到后不再处理其他字段
+                    elif lower.startswith("理由") or lower.startswith("证据"):
+                        # 兼容旧格式：合并理由和证据
+                        reason_text = normalized.split(":", 1)[-1].strip()
+                        if reason_text:
+                            reason_parts.append(reason_text)
+                
+                # 合并所有理由和证据部分
+                reason = " ".join(reason_parts)[:30] if reason_parts else ""
                 
                 if score_val is None:
                     score_val = 0
@@ -154,7 +164,7 @@ class ReqClarifyAgent:
                     req_id=req_id,
                     score=score_val,
                     reason=reason,
-                    evidence=evidence or None
+                    evidence=None  # 证据已合并到reason中
                 ))
             
             # 记录评分结果统计

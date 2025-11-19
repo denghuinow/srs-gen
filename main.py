@@ -42,6 +42,13 @@ def main():
     )
     
     parser.add_argument(
+        "--baseline-gend-srs",
+        type=str,
+        default="",
+        help="基准生成的SRS文件路径（可选），将被解析成需求语义单元作为需求参考"
+    )
+    
+    parser.add_argument(
         "--ablation-mode",
         type=str,
         choices=["default", "no-clarify", "no-explore-clarify"],
@@ -76,6 +83,11 @@ def main():
     if args.baseline_srs:
         baseline_srs = load_file(args.baseline_srs)
     
+    # 加载基准生成的SRS
+    baseline_gend_srs = ""
+    if args.baseline_gend_srs:
+        baseline_gend_srs = load_file(args.baseline_gend_srs)
+    
     # 验证配置
     try:
         Config.validate()
@@ -103,6 +115,7 @@ def main():
         result = orchestrator.run(
             raw_input=raw_input,
             baseline_srs=baseline_srs,
+            baseline_gend_srs=baseline_gend_srs,
             ablation_mode=args.ablation_mode,  # type: ignore
             max_iterations=args.max_iterations
         )
@@ -147,6 +160,18 @@ def main():
                 logger.info(f"基准文档已复制到：{baseline_dest}")
             else:
                 logger.warning(f"基准文档文件不存在：{baseline_path}")
+        
+        # 复制基准生成的SRS文档到输出目录
+        if args.baseline_gend_srs:
+            baseline_gend_path = Path(args.baseline_gend_srs)
+            if baseline_gend_path.exists():
+                baseline_gend_suffix = baseline_gend_path.suffix
+                baseline_gend_stem = baseline_gend_path.stem
+                baseline_gend_dest = output_dir / f"baseline_gend_srs_{baseline_gend_stem}{baseline_gend_suffix}"
+                shutil.copy2(baseline_gend_path, baseline_gend_dest)
+                logger.info(f"基准生成的SRS文档已复制到：{baseline_gend_dest}")
+            else:
+                logger.warning(f"基准生成的SRS文档文件不存在：{baseline_gend_path}")
         
         # 输出统计信息
         logger.info("\n=== 执行统计 ===")

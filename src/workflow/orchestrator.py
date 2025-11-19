@@ -33,11 +33,20 @@ class WorkflowOrchestrator:
         if self.timer_manager is None:
             self.timer_manager = state["timer_manager"]
         
-        agent = ReqParseAgent(self.client, self.timer_manager)
-        requirement_structure = agent.parse(state["raw_input"])
+        # requirement_structure 直接使用 raw_input，不再通过 ReqParseAgent 解析
+        state["requirement_structure"] = state["raw_input"]  # type: ignore
+        self.logger.info(f"需求结构直接使用用户输入，长度: {len(state['raw_input'])} 字符")
         
-        # 存储需求结构到状态
-        state["requirement_structure"] = requirement_structure  # type: ignore
+        # 如果存在 baseline_gend_srs，使用 ReqParseAgent 解析它生成需求语义单元
+        baseline_gend_srs = state.get("baseline_gend_srs", "")
+        if baseline_gend_srs:
+            agent = ReqParseAgent(self.client, self.timer_manager)
+            baseline_requirement_structure = agent.parse(baseline_gend_srs, input_type="基准生成的SRS")
+            state["baseline_requirement_structure"] = baseline_requirement_structure  # type: ignore
+            self.logger.info(f"基准需求语义单元生成完成，长度: {len(baseline_requirement_structure)} 字符")
+        else:
+            state["baseline_requirement_structure"] = ""  # type: ignore
+        
         return state
     
     def _explore_node(self, state: WorkflowState) -> WorkflowState:
@@ -51,14 +60,15 @@ class WorkflowOrchestrator:
             state["iteration_count"] += 1
             self.logger.info(f"继续迭代，迭代号递增至: {state['iteration_count']}")
 
-        requirement_structure = state.get("requirement_structure", "")  # type: ignore
         raw_input = state["raw_input"]
+        baseline_requirement_structure = state.get("baseline_requirement_structure", "")  # type: ignore
 
         # 记录挖掘前的需求ID集合
         req_ids_before = set(req.id for req in state["requirements"].requirements)
         self.logger.debug(f"[迭代 {state['iteration_count']}] 挖掘前需求ID集合: {sorted(req_ids_before)}")
 
         if self.ablation_mode == "no-explore-clarify":
+            requirement_structure = state.get("requirement_structure", "")  # type: ignore
             self.logger.info(
                 f"[迭代 {state['iteration_count']}] no-explore-clarify 模式：跳过 ReqExplore，直接映射需求结构"
             )
@@ -70,11 +80,11 @@ class WorkflowOrchestrator:
         else:
             agent = ReqExploreAgent(self.client, state["timer_manager"])
             state["requirements"] = agent.explore(
-                requirement_structure,
                 raw_input,
                 state["requirements"],
                 state["forbidden_list"],
-                state["iteration_count"]
+                state["iteration_count"],
+                baseline_requirement_structure
             )
         
         # 记录挖掘后的需求ID集合
@@ -301,13 +311,13 @@ class WorkflowOrchestrator:
         """生成节点"""
         agent = DocGenerateAgent(self.client, state["timer_manager"])
         
-        # 基于历史得分筛选：只要历史中曾经有过>=1的得分，就进入文档生成
+        # 基于历史得分筛选：只要历史中曾经有过>0的得分，就进入文档生成
         filtered_requirements = RequirementList()
         excluded_ids = []
         
         for req in state["requirements"].requirements:
             best_score = state["score_history"].get_best_score(req.id)
-            if best_score is None or best_score >= 0:
+            if best_score is not None and best_score > 0:
                 filtered_requirements.requirements.append(req)
             else:
                 excluded_ids.append(req.id)
@@ -316,7 +326,7 @@ class WorkflowOrchestrator:
         total_count = len(state["requirements"].requirements)
         filtered_count = len(filtered_requirements.requirements)
         if total_count != filtered_count:
-            self.logger.info(f"文档生成：从 {total_count} 个需求中筛选出 {filtered_count} 个历史得分>=0的需求")
+            self.logger.info(f"文档生成：从 {total_count} 个需求中筛选出 {filtered_count} 个历史得分>0的需求")
             if excluded_ids:
                 self.logger.debug(f"被排除的需求ID: {sorted(excluded_ids)}")
         
@@ -365,6 +375,7 @@ class WorkflowOrchestrator:
         self,
         raw_input: str,
         baseline_srs: str = "",
+        baseline_gend_srs: str = "",
         ablation_mode: AblationMode = "default",
         max_iterations: Optional[int] = None
     ) -> dict:
@@ -380,6 +391,7 @@ class WorkflowOrchestrator:
         initial_state: WorkflowState = {
             "raw_input": raw_input,
             "baseline_srs": baseline_srs,
+            "baseline_gend_srs": baseline_gend_srs,
             "requirements": RequirementList(),
             "forbidden_list": ForbiddenList(),
             "score_history": ScoreHistory(),
