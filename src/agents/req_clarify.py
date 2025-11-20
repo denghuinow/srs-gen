@@ -7,15 +7,19 @@ from ..models.requirement import Requirement, RequirementList, ClarificationResu
 from ..utils.timer import TimerManager
 from ..utils.logger import get_logger
 from ..utils.streaming import stream_with_continuation
+from ..utils.prompt_loader import PromptLoader
 
 
 class ReqClarifyAgent:
     """需求澄清智能体：加载基准SRS，进行一致性评分"""
     
-    def __init__(self, client: OpenAI, timer_manager: TimerManager):
+    def __init__(self, client: OpenAI, timer_manager: TimerManager, prompt_version: str = None):
         self.client = client
         self.timer = timer_manager.get_timer("ReqClarify")
         self.logger = get_logger("ReqClarify")
+        self.prompt_loader = PromptLoader(
+            prompt_version=prompt_version or Config.PROMPT_VERSION
+        )
     
     def clarify(
         self,
@@ -54,21 +58,12 @@ class ReqClarifyAgent:
                 for req in needs_scoring
             ])
             
-            prompt = f"""你是“需求验收专家”，站在验收方立场对照基准SRS为需求清单中的每条需求打分，只依赖基准SRS中的明确证据，不猜测范围。
-
-[基准SRS]：
-{baseline_srs}
-
-[需求清单]：
-{requirements_text}
-
-评分规则：
-+2: 高度一致  +1: 基本一致  0: 中性  -1: 轻微冲突  -2: 明确冲突
-
-输出格式（每行一条）：
-REQ-XXX | 评分: <score> | 说明: <简短说明30字内，引用基准SRS中的明确证据，指出需求与基准SRS的一致/不一致点，不给建议>
-
-请逐条评分。"""
+            # 使用提示词加载器加载并格式化提示词
+            prompt = self.prompt_loader.format(
+                "req_clarify",
+                baseline_srs=baseline_srs,
+                requirements_list_text=requirements_text
+            )
             
             # 记录完整请求内容
             self.logger.debug("完整请求内容:")

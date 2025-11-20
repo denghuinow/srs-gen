@@ -36,6 +36,21 @@ class Config:
     # 续接配置
     MAX_CONTINUATIONS: int = int(os.getenv("MAX_CONTINUATIONS", "2"))  # 当因max_tokens导致输出被截断时自动请求接续的次数上限
     
+    # 提示词版本配置
+    PROMPT_VERSION: str = os.getenv("PROMPT_VERSION", "v1")  # 提示词版本，默认为v1
+    
+    # 最大上下文长度配置
+    @classmethod
+    def get_max_context_length(cls) -> Optional[int]:
+        """获取最大上下文长度配置值"""
+        max_context_length_str = os.getenv("MAX_CONTEXT_LENGTH")
+        if max_context_length_str:
+            try:
+                return int(max_context_length_str)
+            except ValueError:
+                return None
+        return None
+    
     @classmethod
     def get_max_tokens(cls) -> Optional[int]:
         """获取MAX_TOKENS配置值"""

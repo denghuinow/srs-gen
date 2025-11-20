@@ -7,16 +7,20 @@ from ..models.srs_template import SRSTemplate
 from ..utils.timer import TimerManager
 from ..utils.logger import get_logger
 from ..utils.streaming import stream_with_continuation
+from ..utils.prompt_loader import PromptLoader
 
 
 class DocGenerateAgent:
     """文档生成智能体：基于清单生成SRS文档"""
 
-    def __init__(self, client: OpenAI, timer_manager: TimerManager):
+    def __init__(self, client: OpenAI, timer_manager: TimerManager, prompt_version: str = None):
         self.client = client
         self.timer = timer_manager.get_timer("DocGenerate")
         self.template = SRSTemplate()
         self.logger = get_logger("DocGenerate")
+        self.prompt_loader = PromptLoader(
+            prompt_version=prompt_version or Config.PROMPT_VERSION
+        )
 
     def generate(
         self,
@@ -63,16 +67,14 @@ class DocGenerateAgent:
             style_profile = """
             Writing Style: Professional\nStructure: IEEE 830\nFormatting: Markdown
             """
-            prompt = f"""You are an expert in creating Software Requirements Specification (SRS) documents. 
-Generate a comprehensive SRS document based on the following information:
-
-Project Summary: {raw_input}
-Requirements: {requirements_text}
-Style Profile: {style_profile}
-Context Examples: {context}
-
-Ensure the document follows professional SRS standards with proper sections, formatting, and technical accuracy. 
-            Use markdown formatting with appropriate headers, lists, and code blocks where necessary."""
+            # 使用提示词加载器加载并格式化提示词
+            prompt = self.prompt_loader.format(
+                "doc_generate",
+                raw_input=raw_input,
+                requirements_text=requirements_text,
+                style_profile=style_profile,
+                context_examples=context
+            )
 
             messages = [
                 {"role": "user", "content": prompt},
@@ -97,12 +99,12 @@ Ensure the document follows professional SRS standards with proper sections, for
                 base_api_params["max_tokens"] = max_tokens
 
             # 使用统一的流式响应和续接处理
+            # 接续生成不需要提示词，使用对话前缀续写方式
             generated_doc = stream_with_continuation(
                 client=self.client,
                 base_api_params=base_api_params,
                 messages=messages,
-                task_name="文档生成",
-                continuation_prompt="请继续完成上文未完的内容，保持相同的章节结构并直接衔接。"
+                task_name="文档生成"
             )
             if generated_doc:
                 self.logger.info(f"文档生成完成，长度: {len(generated_doc)} 字符")

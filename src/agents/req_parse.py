@@ -5,15 +5,19 @@ from ..config import Config
 from ..utils.timer import TimerManager
 from ..utils.logger import get_logger
 from ..utils.streaming import stream_with_continuation
+from ..utils.prompt_loader import PromptLoader
 
 
 class ReqParseAgent:
     """需求解析智能体：将自然语言需求解析为需求语义单元"""
 
-    def __init__(self, client: OpenAI, timer_manager: TimerManager):
+    def __init__(self, client: OpenAI, timer_manager: TimerManager, prompt_version: str = None):
         self.client = client
         self.timer = timer_manager.get_timer("ReqParse")
         self.logger = get_logger("ReqParse")
+        self.prompt_loader = PromptLoader(
+            prompt_version=prompt_version or Config.PROMPT_VERSION
+        )
 
     def parse(self, raw_input: str, input_type: str = "用户需求") -> str:
         """解析自然语言需求为需求语义单元（Markdown格式）
@@ -32,27 +36,12 @@ class ReqParseAgent:
                 else f"输入文本: {raw_input}"
             )
 
-            # 需求语义单元生成 Prompt（参考 index.html 的 defaultPrompt）
-            requirement_semantic_unit_prompt_template = """{{CONTENT}}
-请根据以上软件需求规格说明书（SRS）文档，识别并提取其中的核心内容：
-
-1. 功能需求：列出所有明确的功能模块及其具体描述，包括输入输出参数、处理逻辑和性能指标
-2. 非功能需求：提取所有性能要求、安全要求、可用性要求和可靠性指标，并量化具体数值
-3. 约束条件：识别所有技术约束、业务约束和法规约束，包括具体的版本要求、兼容性标准和合规规范
-4. 业务规则：提取所有业务逻辑规则、数据验证规则和流程控制规则，明确触发条件和执行结果
-
-要求：
-- 每个内容项需包含：类型、描述、优先级、关联关系和验证标准
-- 对于模糊的需求描述，需基于行业最佳实践补充具体实现细节和量化指标
-- 识别需求间的依赖关系，建立内容项间的关联映射
-- 不要使用JSON格式输出结果
-- 在输出中避免使用"语义单元"及相关表述
-- 直接开始输出提取结果，不要使用"根据提供的软件需求规格说明书（SRS），以下是提取的核心内容，按照要求的结构化文本格式进行组织"等类似的开场白
-- 不要使用固定的结构化输出格式，如"名称："、"类型："、"详细描述："等标签化的段落结构，而是采用自然流畅的段落描述方式"""
-
-            # 替换占位符
-            prompt = requirement_semantic_unit_prompt_template.replace(
-                "{{CONTENT}}", raw_input
+            # 使用提示词加载器加载并格式化提示词
+            # 注意：虽然方法参数名是 raw_input，但实际来源是命令行参数 --baseline-gend-srs
+            # 因此提示词模板变量名使用 baseline_gend_srs 以保持与命令行参数名一致
+            prompt = self.prompt_loader.format(
+                "req_parse",
+                baseline_gend_srs=raw_input
             )
 
             # 记录完整请求内容

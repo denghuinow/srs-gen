@@ -17,12 +17,13 @@ from ..utils.logger import get_logger
 class WorkflowOrchestrator:
     """工作流编排器"""
     
-    def __init__(self, ablation_mode: AblationMode = "default"):
+    def __init__(self, ablation_mode: AblationMode = "default", prompt_version: str = None):
         Config.ABLATION_MODE = ablation_mode
         Config.validate()
         
         self.client = OpenAI(**Config.get_openai_client_kwargs())
         self.ablation_mode = ablation_mode
+        self.prompt_version = prompt_version or Config.PROMPT_VERSION
         self.logger = get_logger("Orchestrator")
         
         # 初始化智能体（计时器将在状态中共享）
@@ -40,7 +41,7 @@ class WorkflowOrchestrator:
         # 如果存在 baseline_gend_srs，使用 ReqParseAgent 解析它生成需求语义单元
         baseline_gend_srs = state.get("baseline_gend_srs", "")
         if baseline_gend_srs:
-            agent = ReqParseAgent(self.client, self.timer_manager)
+            agent = ReqParseAgent(self.client, self.timer_manager, prompt_version=self.prompt_version)
             baseline_requirement_structure = agent.parse(baseline_gend_srs, input_type="基准生成的SRS")
             state["baseline_requirement_structure"] = baseline_requirement_structure  # type: ignore
             self.logger.info(f"基准需求语义单元生成完成，长度: {len(baseline_requirement_structure)} 字符")
@@ -78,7 +79,7 @@ class WorkflowOrchestrator:
                 state["iteration_count"]
             )
         else:
-            agent = ReqExploreAgent(self.client, state["timer_manager"])
+            agent = ReqExploreAgent(self.client, state["timer_manager"], prompt_version=self.prompt_version)
             max_new_requirements = state.get("max_new_requirements_per_iteration")  # type: ignore
             state["requirements"] = agent.explore(
                 raw_input,
@@ -217,7 +218,7 @@ class WorkflowOrchestrator:
             self.logger.debug(f"[迭代 {state['iteration_count']}] 澄清后需求ID集合: {sorted(req_ids_after)}")
             return state
         
-        agent = ReqClarifyAgent(self.client, state["timer_manager"])
+        agent = ReqClarifyAgent(self.client, state["timer_manager"], prompt_version=self.prompt_version)
         results = agent.clarify(state["requirements"], state["baseline_srs"])
         
         # 应用评分结果
@@ -304,7 +305,7 @@ class WorkflowOrchestrator:
     
     def _generate_node(self, state: WorkflowState) -> WorkflowState:
         """生成节点"""
-        agent = DocGenerateAgent(self.client, state["timer_manager"])
+        agent = DocGenerateAgent(self.client, state["timer_manager"], prompt_version=self.prompt_version)
         
         # 基于历史得分筛选：只要历史中曾经有过>0的得分，就进入文档生成
         filtered_requirements = RequirementList()

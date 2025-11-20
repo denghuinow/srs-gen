@@ -77,6 +77,13 @@ def main():
         help="每轮迭代新增需求数量（默认：从环境变量NEW_REQUIREMENTS_PER_ITERATION或配置中读取，默认值为10）"
     )
     
+    parser.add_argument(
+        "--prompt-version",
+        type=str,
+        default=None,
+        help="提示词版本（默认：从环境变量PROMPT_VERSION或配置中读取，默认值为v1）"
+    )
+    
     args = parser.parse_args()
     
     # 加载输入
@@ -94,6 +101,10 @@ def main():
     baseline_gend_srs = ""
     if args.baseline_gend_srs:
         baseline_gend_srs = load_file(args.baseline_gend_srs)
+    
+    # 设置提示词版本（如果通过参数指定）
+    if args.prompt_version:
+        Config.PROMPT_VERSION = args.prompt_version
     
     # 验证配置
     try:
@@ -116,7 +127,12 @@ def main():
     logger.info(f"开始运行SRS编制系统（模式：{args.ablation_mode}）...")
     logger.info(f"输出目录：{output_dir.absolute()}")
     logger.info(f"日志文件：{log_file_path}")
-    orchestrator = WorkflowOrchestrator(ablation_mode=args.ablation_mode)  # type: ignore
+    if args.prompt_version:
+        logger.info(f"提示词版本：{args.prompt_version}")
+    orchestrator = WorkflowOrchestrator(
+        ablation_mode=args.ablation_mode,  # type: ignore
+        prompt_version=args.prompt_version
+    )
     
     try:
         result = orchestrator.run(
