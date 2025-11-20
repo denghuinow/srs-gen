@@ -70,6 +70,13 @@ def main():
         help="最大迭代次数（默认：从环境变量MAX_ITERATIONS或配置中读取，默认值为5）"
     )
     
+    parser.add_argument(
+        "--max-new-requirements-per-iteration",
+        type=int,
+        default=None,
+        help="每轮迭代新增需求数量（默认：从环境变量NEW_REQUIREMENTS_PER_ITERATION或配置中读取，默认值为10）"
+    )
+    
     args = parser.parse_args()
     
     # 加载输入
@@ -117,7 +124,8 @@ def main():
             baseline_srs=baseline_srs,
             baseline_gend_srs=baseline_gend_srs,
             ablation_mode=args.ablation_mode,  # type: ignore
-            max_iterations=args.max_iterations
+            max_iterations=args.max_iterations,
+            max_new_requirements_per_iteration=args.max_new_requirements_per_iteration
         )
         
         # 保存SRS文档

@@ -22,6 +22,7 @@ class ReqExploreAgent:
         existing_requirements: RequirementList,
         iteration: int,
         baseline_requirement_structure: str = "",
+        max_new_requirements_per_iteration: Optional[int] = None,
     ) -> RequirementList:
         """挖掘补充需求"""
         self.timer.start()
@@ -65,11 +66,11 @@ class ReqExploreAgent:
             # 获取下一个可用ID
             next_id = existing_requirements.get_next_id()
 
-            # 使用配置的固定值作为新需求数量
-            new_req_count = Config.NEW_REQUIREMENTS_PER_ITERATION
+            # 使用参数指定的值，如果未指定则使用配置的默认值
+            new_req_count = max_new_requirements_per_iteration if max_new_requirements_per_iteration is not None else Config.NEW_REQUIREMENTS_PER_ITERATION
 
             self.logger.info(
-                f"需要生成新需求数量: {new_req_count} (配置值: NEW_REQUIREMENTS_PER_ITERATION={Config.NEW_REQUIREMENTS_PER_ITERATION})"
+                f"需要生成新需求数量: {new_req_count} (来源: {'参数指定' if max_new_requirements_per_iteration is not None else f'配置值 NEW_REQUIREMENTS_PER_ITERATION={Config.NEW_REQUIREMENTS_PER_ITERATION}'})"
             )
 
             # 构建完整需求清单（包含id、评分、需求细节）

@@ -79,11 +79,13 @@ class WorkflowOrchestrator:
             )
         else:
             agent = ReqExploreAgent(self.client, state["timer_manager"])
+            max_new_requirements = state.get("max_new_requirements_per_iteration")  # type: ignore
             state["requirements"] = agent.explore(
                 raw_input,
                 state["requirements"],
                 state["iteration_count"],
-                baseline_requirement_structure
+                baseline_requirement_structure,
+                max_new_requirements_per_iteration=max_new_requirements
             )
         
         # 记录挖掘后的需求ID集合
@@ -370,7 +372,8 @@ class WorkflowOrchestrator:
         baseline_srs: str = "",
         baseline_gend_srs: str = "",
         ablation_mode: AblationMode = "default",
-        max_iterations: Optional[int] = None
+        max_iterations: Optional[int] = None,
+        max_new_requirements_per_iteration: Optional[int] = None
     ) -> dict:
         """运行工作流"""
         from ..utils.timer import TimerManager
@@ -390,7 +393,8 @@ class WorkflowOrchestrator:
             "iteration_count": 0,
             "ablation_mode": ablation_mode,
             "convergence_reached": False,
-            "max_iterations": max_iterations if max_iterations is not None else Config.MAX_ITERATIONS  # type: ignore
+            "max_iterations": max_iterations if max_iterations is not None else Config.MAX_ITERATIONS,  # type: ignore
+            "max_new_requirements_per_iteration": max_new_requirements_per_iteration  # type: ignore
         }
         
         # 开始计时

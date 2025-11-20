@@ -11,6 +11,17 @@ import time
 from datetime import datetime
 import re
 
+# 导入配置以获取模型信息
+try:
+    from src.config import Config
+except ImportError:
+    # 如果导入失败，使用环境变量
+    import os
+    class Config:
+        OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", "5"))
+        NEW_REQUIREMENTS_PER_ITERATION = int(os.getenv("NEW_REQUIREMENTS_PER_ITERATION", "10"))
+
 
 def find_matching_baseline(input_file: Path, baseline_dir: Path) -> Optional[Path]:
     """根据输入文件名查找匹配的基准文档"""
@@ -32,6 +43,31 @@ def find_matching_baseline(input_file: Path, baseline_dir: Path) -> Optional[Pat
                 return baseline_file
     
     return None
+
+
+def extract_iteration_info_from_log(log_file: Path) -> Optional[dict]:
+    """从日志文件中提取迭代信息"""
+    if not log_file.exists():
+        return None
+    
+    try:
+        with open(log_file, "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        # 查找迭代次数信息
+        # 通常日志中会有类似 "迭代 X" 或 "iteration_count: X" 的信息
+        iteration_match = re.search(r'迭代[：:]\s*(\d+)', content)
+        if not iteration_match:
+            # 尝试查找其他格式
+            iteration_match = re.search(r'iteration[_\s]*count[：:]\s*(\d+)', content, re.IGNORECASE)
+        
+        iteration_count = int(iteration_match.group(1)) if iteration_match else None
+        
+        return {
+            "iteration_count": iteration_count
+        }
+    except Exception:
+        return None
 
 
 def is_retryable_error(error_msg: str) -> bool:
@@ -69,6 +105,7 @@ def run_single_task(
     output_base_dir: Path,
     ablation_mode: str,
     max_iterations: Optional[int],
+    max_new_requirements_per_iteration: Optional[int],
     extra_args: List[str],
     max_retries: int = 3,
     retry_delay: float = 5.0
@@ -96,6 +133,9 @@ def run_single_task(
     
     if max_iterations:
         cmd.extend(["--max-iterations", str(max_iterations)])
+    
+    if max_new_requirements_per_iteration:
+        cmd.extend(["--max-new-requirements-per-iteration", str(max_new_requirements_per_iteration)])
     
     cmd.extend(extra_args)
     
@@ -194,6 +234,13 @@ def main():
         type=int,
         default=None,
         help="最大迭代次数（可选）"
+    )
+    
+    parser.add_argument(
+        "--max-new-requirements-per-iteration",
+        type=int,
+        default=None,
+        help="每轮迭代新增需求数量（可选）"
     )
     
     parser.add_argument(
@@ -352,6 +399,7 @@ def main():
                 output_base_dir,
                 args.ablation_mode,
                 args.max_iterations,
+                args.max_new_requirements_per_iteration,
                 args.extra_args or [],
                 args.max_retries,
                 args.retry_delay
@@ -376,6 +424,7 @@ def main():
                     output_base_dir,
                     args.ablation_mode,
                     args.max_iterations,
+                    args.max_new_requirements_per_iteration,
                     args.extra_args or [],
                     args.max_retries,
                     args.retry_delay
@@ -433,12 +482,45 @@ def main():
         f.write(f"输出目录：{output_base_dir.absolute()}\n")
         f.write(f"并行度：{args.parallel}\n")
         f.write(f"消融模式：{args.ablation_mode}\n")
+        
+        # 记录模型信息
+        f.write(f"使用的模型：{Config.OPENAI_MODEL}\n")
+        
+        # 记录迭代配置信息
+        max_iterations = args.max_iterations if args.max_iterations is not None else Config.MAX_ITERATIONS
+        f.write(f"最大迭代轮次：{max_iterations}\n")
+        
+        # 记录每轮迭代新增需求数量
+        max_new_req = args.max_new_requirements_per_iteration if args.max_new_requirements_per_iteration is not None else Config.NEW_REQUIREMENTS_PER_ITERATION
+        f.write(f"每轮迭代新增需求数量：{max_new_req}\n")
+        
         f.write(f"最大重试次数：{args.max_retries}\n")
         f.write(f"重试延迟：{args.retry_delay}秒\n")
         f.write(f"总任务数：{len(results)}\n")
         f.write(f"成功：{success_count}\n")
         f.write(f"失败：{fail_count}\n")
         f.write(f"总耗时：{total_time:.2f}秒\n")
+        
+        # 尝试从成功任务的日志中提取实际迭代次数
+        actual_iterations = []
+        for task_name, success, _, input_file in results:
+            if success:
+                task_output_dir = output_base_dir / task_name
+                # 查找日志文件（通常以.log结尾）
+                log_files = list(task_output_dir.glob("*.log"))
+                if log_files:
+                    log_info = extract_iteration_info_from_log(log_files[0])
+                    if log_info and log_info.get("iteration_count") is not None:
+                        actual_iterations.append((task_name, log_info["iteration_count"]))
+        
+        if actual_iterations:
+            f.write(f"\n实际迭代轮次统计：\n")
+            iteration_counts = {}
+            for task_name, count in actual_iterations:
+                iteration_counts[count] = iteration_counts.get(count, 0) + 1
+            for count in sorted(iteration_counts.keys()):
+                f.write(f"  {count}轮迭代：{iteration_counts[count]}个任务\n")
+        
         f.write("\n详细结果：\n")
         for task_name, success, msg, _ in results:
             status = "成功" if success else "失败"
