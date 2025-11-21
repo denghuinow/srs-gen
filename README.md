@@ -37,6 +37,11 @@ cp .env.example .env
 # TEMPERATURE_REQ_EXPLORE=0.7  # 需求挖掘智能体温度（默认：0.7）
 # TEMPERATURE_REQ_CLARIFY=0.0  # 需求澄清智能体温度（默认：0.0）
 # TEMPERATURE_DOC_GENERATE=0.0  # 文档生成智能体温度（默认：0.0）
+# 智能体模型配置（可选，用于为每个智能体配置不同的模型）
+# MODEL_REQ_PARSE=gpt-4o-mini  # 需求解析智能体模型（默认：使用 OPENAI_MODEL）
+# MODEL_REQ_EXPLORE=gpt-4o-mini  # 需求挖掘智能体模型（默认：使用 OPENAI_MODEL）
+# MODEL_REQ_CLARIFY=gpt-4o  # 需求澄清智能体模型（默认：使用 OPENAI_MODEL）
+# MODEL_DOC_GENERATE=gpt-4o  # 文档生成智能体模型（默认：使用 OPENAI_MODEL）
 ```
 
 或者直接设置环境变量：
@@ -53,6 +58,11 @@ export TEMPERATURE_REQ_PARSE="0.6"  # 需求解析智能体温度（默认：0.6
 export TEMPERATURE_REQ_EXPLORE="0.7"  # 需求挖掘智能体温度（默认：0.7）
 export TEMPERATURE_REQ_CLARIFY="0.0"  # 需求澄清智能体温度（默认：0.0）
 export TEMPERATURE_DOC_GENERATE="0.0"  # 文档生成智能体温度（默认：0.0）
+# 智能体模型配置（可选，用于为每个智能体配置不同的模型）
+export MODEL_REQ_PARSE="gpt-4o-mini"  # 需求解析智能体模型（默认：使用 OPENAI_MODEL）
+export MODEL_REQ_EXPLORE="gpt-4o-mini"  # 需求挖掘智能体模型（默认：使用 OPENAI_MODEL）
+export MODEL_REQ_CLARIFY="gpt-4o"  # 需求澄清智能体模型（默认：使用 OPENAI_MODEL）
+export MODEL_DOC_GENERATE="gpt-4o"  # 文档生成智能体模型（默认：使用 OPENAI_MODEL）
 ```
 
 ## 使用方法

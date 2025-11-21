@@ -111,6 +111,38 @@ class Config:
         return 0.0  # 默认值
     
     @classmethod
+    def get_model_req_parse(cls) -> str:
+        """获取需求解析智能体的模型配置"""
+        model_str = os.getenv("MODEL_REQ_PARSE")
+        if model_str:
+            return model_str
+        return cls.OPENAI_MODEL  # 默认使用全局模型
+    
+    @classmethod
+    def get_model_req_explore(cls) -> str:
+        """获取需求挖掘智能体的模型配置"""
+        model_str = os.getenv("MODEL_REQ_EXPLORE")
+        if model_str:
+            return model_str
+        return cls.OPENAI_MODEL  # 默认使用全局模型
+    
+    @classmethod
+    def get_model_req_clarify(cls) -> str:
+        """获取需求澄清智能体的模型配置"""
+        model_str = os.getenv("MODEL_REQ_CLARIFY")
+        if model_str:
+            return model_str
+        return cls.OPENAI_MODEL  # 默认使用全局模型
+    
+    @classmethod
+    def get_model_doc_generate(cls) -> str:
+        """获取文档生成智能体的模型配置"""
+        model_str = os.getenv("MODEL_DOC_GENERATE")
+        if model_str:
+            return model_str
+        return cls.OPENAI_MODEL  # 默认使用全局模型
+    
+    @classmethod
     def validate(cls) -> None:
         """验证配置"""
         if not cls.OPENAI_API_KEY:

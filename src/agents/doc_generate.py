@@ -89,7 +89,7 @@ class DocGenerateAgent:
 
             # 构建API调用基础参数
             base_api_params = {
-                "model": Config.OPENAI_MODEL,
+                "model": Config.get_model_doc_generate(),
                 "temperature": Config.get_temperature_doc_generate(),
             }
 
