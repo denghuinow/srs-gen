@@ -90,7 +90,7 @@ class DocGenerateAgent:
             # 构建API调用基础参数
             base_api_params = {
                 "model": Config.OPENAI_MODEL,
-                "temperature": 0.0,
+                "temperature": Config.get_temperature_doc_generate(),
             }
 
             # 如果配置了MAX_TOKENS，则添加到参数中

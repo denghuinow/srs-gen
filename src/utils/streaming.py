@@ -1,7 +1,8 @@
 """流式响应工具模块：统一处理流式响应和自动续接"""
 import sys
+import time
 from typing import Callable, List, Tuple
-from openai import OpenAI
+from openai import OpenAI, APIError, APITimeoutError, InternalServerError
 
 from ..config import Config
 from .logger import get_logger
@@ -11,7 +12,7 @@ logger = get_logger("Streaming")
 
 
 def request_stream_completion(client: OpenAI, api_params: dict) -> Tuple[str, str]:
-    """处理流式补全请求
+    """处理流式补全请求（带重试机制）
     
     Args:
         client: OpenAI客户端实例
@@ -19,23 +20,95 @@ def request_stream_completion(client: OpenAI, api_params: dict) -> Tuple[str, st
     
     Returns:
         (内容, finish_reason)
+    
+    Raises:
+        Exception: 所有重试都失败后抛出异常
     """
-    content_parts = []
-    finish_reason = "stop"
-    stream_response = client.chat.completions.create(**api_params)
-    for chunk in stream_response:
-        if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-            content = chunk.choices[0].delta.content
-            content_parts.append(content)
-            sys.stdout.write(content)
+    max_retries = Config.MAX_RETRIES
+    retry_delay = Config.RETRY_DELAY
+    last_exception = None
+    
+    for attempt in range(max_retries + 1):
+        try:
+            if attempt > 0:
+                # 指数退避：延迟时间 = 初始延迟 * 2^(attempt-1)
+                delay = retry_delay * (2 ** (attempt - 1))
+                logger.warning(f"第 {attempt + 1}/{max_retries + 1} 次尝试，等待 {delay:.1f} 秒后重试...")
+                time.sleep(delay)
+            
+            content_parts = []
+            finish_reason = "stop"
+            stream_response = client.chat.completions.create(**api_params)
+            
+            try:
+                for chunk in stream_response:
+                    if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                        content = chunk.choices[0].delta.content
+                        content_parts.append(content)
+                        sys.stdout.write(content)
+                        sys.stdout.flush()
+                    if chunk.choices and chunk.choices[0].finish_reason:
+                        finish_reason = chunk.choices[0].finish_reason
+            except Exception as stream_error:
+                # 流式响应处理过程中的错误也需要重试
+                # 如果已经收集到部分内容，记录日志但不保留（因为流可能不完整）
+                if content_parts:
+                    logger.warning(f"流式响应处理中断，已收集 {len(''.join(content_parts))} 字符，将重试...")
+                # 重新抛出异常以便外层重试逻辑处理
+                raise stream_error
+            
+            sys.stdout.write("\n")
             sys.stdout.flush()
-        if chunk.choices and chunk.choices[0].finish_reason:
-            finish_reason = chunk.choices[0].finish_reason
+            
+            if attempt > 0:
+                logger.info(f"重试成功（第 {attempt + 1} 次尝试）")
+            
+            return "".join(content_parts), finish_reason
+            
+        except (InternalServerError, APITimeoutError) as e:
+            # 对于500错误和超时错误，进行重试
+            last_exception = e
+            error_type = "服务器内部错误" if isinstance(e, InternalServerError) else "请求超时"
+            logger.warning(f"API调用失败（{error_type}）: {e}")
+            if attempt < max_retries:
+                continue
+            else:
+                logger.error(f"所有 {max_retries + 1} 次尝试均失败")
+                raise Exception(f"API调用失败（{error_type}）: {e}")
+                
+        except APIError as e:
+            # 对于其他API错误，根据状态码决定是否重试
+            last_exception = e
+            status_code = getattr(e, 'status_code', None)
+            # 5xx错误可以重试，4xx错误（客户端错误）不重试
+            if status_code and 500 <= status_code < 600:
+                logger.warning(f"API调用失败（服务器错误 {status_code}）: {e}")
+                if attempt < max_retries:
+                    continue
+                else:
+                    logger.error(f"所有 {max_retries + 1} 次尝试均失败")
+                    raise Exception(f"API调用失败（服务器错误 {status_code}）: {e}")
+            else:
+                # 客户端错误（4xx）不重试，直接抛出
+                logger.error(f"API调用失败（客户端错误）: {e}")
+                raise Exception(f"API调用失败: {e}")
+                
+        except Exception as e:
+            # 其他异常（网络错误等）也进行重试
+            last_exception = e
+            logger.warning(f"API调用失败（未知错误）: {e}")
+            if attempt < max_retries:
+                continue
+            else:
+                logger.error(f"所有 {max_retries + 1} 次尝试均失败")
+                raise Exception(f"API调用失败: {e}")
     
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+    # 如果所有重试都失败，抛出最后一个异常
+    if last_exception:
+        raise Exception(f"API调用失败: {last_exception}")
     
-    return "".join(content_parts), finish_reason
+    # 理论上不会到达这里，但为了类型检查
+    raise Exception("API调用失败: 未知错误")
 
 
 def stream_with_continuation(

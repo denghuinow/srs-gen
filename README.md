@@ -32,6 +32,11 @@ cp .env.example .env
 # MAX_TOKENS=16000  # 可选，文档生成时的最大输出token数，未设置则使用API默认值
 # MAX_CONTINUATIONS=2  # 可选，当因max_tokens导致输出被截断时自动请求接续的次数上限，默认为 2
 # ABLATION_MODE=default  # 可选：default, no-clarify, no-explore-clarify
+# 智能体温度配置（可选，用于控制每个智能体的输出随机性）
+# TEMPERATURE_REQ_PARSE=0.6  # 需求解析智能体温度（默认：0.6）
+# TEMPERATURE_REQ_EXPLORE=0.7  # 需求挖掘智能体温度（默认：0.7）
+# TEMPERATURE_REQ_CLARIFY=0.0  # 需求澄清智能体温度（默认：0.0）
+# TEMPERATURE_DOC_GENERATE=0.0  # 文档生成智能体温度（默认：0.0）
 ```
 
 或者直接设置环境变量：
@@ -43,6 +48,11 @@ export MAX_ITERATIONS="5"  # 可选，默认为 5
 export MAX_TOKENS="16000"  # 可选，文档生成时的最大输出token数，未设置则使用API默认值
 export MAX_CONTINUATIONS="2"  # 可选，当因max_tokens导致输出被截断时自动请求接续的次数上限，默认为 2
 export ABLATION_MODE="default"  # 可选：default, no-clarify, no-explore-clarify
+# 智能体温度配置（可选，用于控制每个智能体的输出随机性）
+export TEMPERATURE_REQ_PARSE="0.6"  # 需求解析智能体温度（默认：0.6）
+export TEMPERATURE_REQ_EXPLORE="0.7"  # 需求挖掘智能体温度（默认：0.7）
+export TEMPERATURE_REQ_CLARIFY="0.0"  # 需求澄清智能体温度（默认：0.0）
+export TEMPERATURE_DOC_GENERATE="0.0"  # 文档生成智能体温度（默认：0.0）
 ```
 
 ## 使用方法

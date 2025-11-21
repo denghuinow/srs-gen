@@ -57,7 +57,7 @@ class ReqParseAgent:
             # 构建API调用基础参数
             base_api_params = {
                 "model": Config.OPENAI_MODEL,
-                "temperature": 0.6,
+                "temperature": Config.get_temperature_req_parse(),
             }
             max_tokens = Config.get_max_tokens()
             if max_tokens is not None:

@@ -52,14 +52,9 @@ class WorkflowOrchestrator:
     
     def _explore_node(self, state: WorkflowState) -> WorkflowState:
         """挖掘节点"""
-        # 检查是否是从clarify节点来的继续迭代
-        has_scored_requirements = any(
-            req.score is not None
-            for req in state["requirements"].requirements
-        )
-        if has_scored_requirements:
-            state["iteration_count"] += 1
-            self.logger.info(f"继续迭代，迭代号递增至: {state['iteration_count']}")
+        # 注意：iteration_count的递增现在在_check_convergence中统一处理，
+        # 这里不再需要递增，避免重复递增
+        # 保留此代码块用于日志记录（如果需要）
 
         raw_input = state["raw_input"]
         baseline_requirement_structure = state.get("baseline_requirement_structure", "")  # type: ignore
@@ -296,9 +291,10 @@ class WorkflowOrchestrator:
             self.logger.info(f"[迭代 {iteration}] 收敛判断: 达到最大迭代次数 ({max_iterations})")
             return "generate"
         
-        # 继续迭代（迭代号递增将在_explore_node中执行）
-        # 强制迭代到最大次数，不因无负分条目而提前收敛
-        next_iteration = iteration + 1
+        # 继续迭代：递增迭代号（即使clarify失败也要递增，防止无限循环）
+        # 注意：这里递增iteration_count，确保即使_explore_node中的条件不满足也能递增
+        state["iteration_count"] += 1
+        next_iteration = state["iteration_count"]
         negative_info = "存在负分条目" if has_negative else "无负分条目"
         self.logger.info(f"[迭代 {iteration}] 收敛判断: {negative_info}，继续迭代 -> 迭代 {next_iteration}（强制迭代到最大次数 {max_iterations}）")
         return "continue"
@@ -404,10 +400,15 @@ class WorkflowOrchestrator:
         # 构建并运行工作流
         graph = self.build_graph()
         
-        # 计算递归限制：每次迭代需要约4个节点（parse 1次 + explore + clarify + check_convergence），
-        # 加上 generate 节点，再加上一些缓冲
+        # 计算递归限制：
+        # - parse 节点：1次
+        # - 每次迭代：explore (1) + clarify (1) + check_convergence (1) + 可能的额外节点 = 至少4-5次
+        # - generate 节点：1次
+        # 考虑到条件边和可能的额外调用，使用更保守的计算方式
         max_iterations = initial_state.get("max_iterations", Config.MAX_ITERATIONS)  # type: ignore
-        recursion_limit = max_iterations * 4 + 20  # 安全缓冲
+        # 每次迭代按 6 个节点计算（包含条件边可能触发的额外节点），加上更大的安全缓冲
+        recursion_limit = max(max_iterations * 6 + 50, 100)  # 至少保证 100 的递归限制
+        self.logger.info(f"设置 LangGraph 递归限制: {recursion_limit} (最大迭代次数: {max_iterations})")
         
         # 设置 LangGraph 配置，增加递归限制
         config = {"recursion_limit": recursion_limit}

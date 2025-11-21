@@ -36,6 +36,10 @@ class Config:
     # 续接配置
     MAX_CONTINUATIONS: int = int(os.getenv("MAX_CONTINUATIONS", "2"))  # 当因max_tokens导致输出被截断时自动请求接续的次数上限
     
+    # API重试配置
+    MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "5"))  # API调用最大重试次数
+    RETRY_DELAY: float = float(os.getenv("RETRY_DELAY", "8.0"))  # 重试延迟初始值（秒），使用指数退避
+    
     # 提示词版本配置
     PROMPT_VERSION: str = os.getenv("PROMPT_VERSION", "v1")  # 提示词版本，默认为v1
     
@@ -61,6 +65,50 @@ class Config:
             except ValueError:
                 return None
         return None
+    
+    @classmethod
+    def get_temperature_req_parse(cls) -> float:
+        """获取需求解析智能体的温度参数"""
+        temp_str = os.getenv("TEMPERATURE_REQ_PARSE")
+        if temp_str:
+            try:
+                return float(temp_str)
+            except ValueError:
+                pass
+        return 0.6  # 默认值
+    
+    @classmethod
+    def get_temperature_req_explore(cls) -> float:
+        """获取需求挖掘智能体的温度参数"""
+        temp_str = os.getenv("TEMPERATURE_REQ_EXPLORE")
+        if temp_str:
+            try:
+                return float(temp_str)
+            except ValueError:
+                pass
+        return 0.7  # 默认值
+    
+    @classmethod
+    def get_temperature_req_clarify(cls) -> float:
+        """获取需求澄清智能体的温度参数"""
+        temp_str = os.getenv("TEMPERATURE_REQ_CLARIFY")
+        if temp_str:
+            try:
+                return float(temp_str)
+            except ValueError:
+                pass
+        return 0.0  # 默认值
+    
+    @classmethod
+    def get_temperature_doc_generate(cls) -> float:
+        """获取文档生成智能体的温度参数"""
+        temp_str = os.getenv("TEMPERATURE_DOC_GENERATE")
+        if temp_str:
+            try:
+                return float(temp_str)
+            except ValueError:
+                pass
+        return 0.0  # 默认值
     
     @classmethod
     def validate(cls) -> None:

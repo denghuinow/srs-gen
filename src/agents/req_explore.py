@@ -110,7 +110,7 @@ class ReqExploreAgent:
             # 构建API调用基础参数
             base_api_params = {
                 "model": Config.OPENAI_MODEL,
-                "temperature": 0.7,
+                "temperature": Config.get_temperature_req_explore(),
             }
             max_tokens = Config.get_max_tokens()
             if max_tokens is not None:
