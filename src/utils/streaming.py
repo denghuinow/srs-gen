@@ -80,18 +80,38 @@ def request_stream_completion(client: OpenAI, api_params: dict) -> Tuple[str, st
             # 对于其他API错误，根据状态码决定是否重试
             last_exception = e
             status_code = getattr(e, 'status_code', None)
+            # 提取详细的错误信息
+            error_message = str(e)
+            error_body = getattr(e, 'body', None)
+            if error_body:
+                try:
+                    import json
+                    if isinstance(error_body, str):
+                        error_dict = json.loads(error_body)
+                    else:
+                        error_dict = error_body
+                    if isinstance(error_dict, dict) and 'error' in error_dict:
+                        error_detail = error_dict['error']
+                        if isinstance(error_detail, dict):
+                            error_message = f"{error_message} - {json.dumps(error_detail, ensure_ascii=False)}"
+                        else:
+                            error_message = f"{error_message} - {error_detail}"
+                except Exception:
+                    pass  # 如果解析失败，使用原始错误信息
+            
             # 5xx错误可以重试，4xx错误（客户端错误）不重试
             if status_code and 500 <= status_code < 600:
-                logger.warning(f"API调用失败（服务器错误 {status_code}）: {e}")
+                logger.warning(f"API调用失败（服务器错误 {status_code}）: {error_message}")
                 if attempt < max_retries:
                     continue
                 else:
                     logger.error(f"所有 {max_retries + 1} 次尝试均失败")
-                    raise Exception(f"API调用失败（服务器错误 {status_code}）: {e}")
+                    raise Exception(f"API调用失败（服务器错误 {status_code}）: {error_message}")
             else:
                 # 客户端错误（4xx）不重试，直接抛出
-                logger.error(f"API调用失败（客户端错误）: {e}")
-                raise Exception(f"API调用失败: {e}")
+                error_prefix = f"Error code: {status_code}" if status_code else "客户端错误"
+                logger.error(f"API调用失败（{error_prefix}）: {error_message}")
+                raise Exception(f"API调用失败: {error_prefix} - {error_message}")
                 
         except Exception as e:
             # 其他异常（网络错误等）也进行重试

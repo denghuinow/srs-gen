@@ -162,6 +162,30 @@ def run_single_task(
             error_msg = e.stderr if e.stderr else (e.stdout if e.stdout else str(e))
             last_error = error_msg
             
+            # 提取关键错误信息（去除警告信息，保留实际错误）
+            # 过滤掉 PyTorch/TensorFlow/Flax 的警告信息
+            error_lines = error_msg.split('\n')
+            filtered_lines = []
+            skip_warning = False
+            for line in error_lines:
+                # 跳过 PyTorch/TensorFlow/Flax 相关的警告
+                if any(keyword in line for keyword in ['PyTorch', 'TensorFlow', 'Flax', 'Models won\'t be available']):
+                    skip_warning = True
+                    continue
+                # 如果遇到实际错误信息，停止跳过
+                if skip_warning and ('Error' in line or 'error' in line or '失败' in line or 'Exception' in line):
+                    skip_warning = False
+                if not skip_warning:
+                    filtered_lines.append(line)
+            
+            # 如果过滤后还有内容，使用过滤后的；否则使用原始错误信息
+            filtered_error = '\n'.join(filtered_lines).strip()
+            if filtered_error:
+                error_msg = filtered_error
+            else:
+                # 如果全部被过滤，保留最后几行作为错误信息
+                error_msg = '\n'.join(error_lines[-5:]).strip()
+            
             # 判断是否可重试
             if attempt < max_retries and is_retryable_error(error_msg):
                 # 等待后重试
@@ -169,13 +193,56 @@ def run_single_task(
                 continue
             else:
                 # 不可重试或已达到最大重试次数
+                # 提取错误信息的关键部分（最多500字符，但优先保留错误信息）
+                if len(error_msg) > 500:
+                    # 尝试找到错误信息的关键部分
+                    error_key_parts = []
+                    for keyword in ['API调用失败', 'Error code', 'error', '失败', 'Exception']:
+                        idx = error_msg.find(keyword)
+                        if idx >= 0:
+                            # 提取包含关键词的段落（前后各200字符）
+                            start = max(0, idx - 200)
+                            end = min(len(error_msg), idx + 300)
+                            error_key_parts.append(error_msg[start:end])
+                    if error_key_parts:
+                        error_msg = ' ... '.join(error_key_parts[:2])  # 最多保留2个关键段落
+                    else:
+                        error_msg = error_msg[:500] + '...'
+                
                 if attempt > 0:
-                    return (task_name, False, f"失败 (耗时: {elapsed_time:.2f}秒, 重试: {attempt}次): {error_msg[:200]}")
-                return (task_name, False, f"失败 (耗时: {elapsed_time:.2f}秒): {error_msg[:200]}")
+                    return (task_name, False, f"失败 (耗时: {elapsed_time:.2f}秒, 重试: {attempt}次): {error_msg}")
+                return (task_name, False, f"失败 (耗时: {elapsed_time:.2f}秒): {error_msg}")
     
     # 如果所有重试都失败
     elapsed_time = time.time() - start_time
-    error_msg = last_error[:200] if last_error else "未知错误"
+    if last_error:
+        # 应用相同的过滤和格式化逻辑
+        error_lines = last_error.split('\n')
+        filtered_lines = []
+        skip_warning = False
+        for line in error_lines:
+            if any(keyword in line for keyword in ['PyTorch', 'TensorFlow', 'Flax', 'Models won\'t be available']):
+                skip_warning = True
+                continue
+            if skip_warning and ('Error' in line or 'error' in line or '失败' in line or 'Exception' in line):
+                skip_warning = False
+            if not skip_warning:
+                filtered_lines.append(line)
+        error_msg = '\n'.join(filtered_lines).strip() or '\n'.join(error_lines[-5:]).strip()
+        if len(error_msg) > 500:
+            error_key_parts = []
+            for keyword in ['API调用失败', 'Error code', 'error', '失败', 'Exception']:
+                idx = error_msg.find(keyword)
+                if idx >= 0:
+                    start = max(0, idx - 200)
+                    end = min(len(error_msg), idx + 300)
+                    error_key_parts.append(error_msg[start:end])
+            if error_key_parts:
+                error_msg = ' ... '.join(error_key_parts[:2])
+            else:
+                error_msg = error_msg[:500] + '...'
+    else:
+        error_msg = "未知错误"
     return (task_name, False, f"失败 (耗时: {elapsed_time:.2f}秒, 重试: {max_retries}次): {error_msg}")
 
 
@@ -524,7 +591,19 @@ def main():
         f.write("\n详细结果：\n")
         for task_name, success, msg, _ in results:
             status = "成功" if success else "失败"
-            f.write(f"{status}: {task_name} - {msg}\n")
+            # 对于失败的任务，将错误信息格式化显示
+            if not success:
+                # 将错误信息分行显示，使其更易读
+                error_lines = msg.split('\n')
+                if len(error_lines) > 1:
+                    f.write(f"{status}: {task_name} - {error_lines[0]}\n")
+                    for line in error_lines[1:]:
+                        if line.strip():
+                            f.write(f"   {line.strip()}\n")
+                else:
+                    f.write(f"{status}: {task_name} - {msg}\n")
+            else:
+                f.write(f"{status}: {task_name} - {msg}\n")
     
     print(f"摘要已保存到：{summary_file}")
     
