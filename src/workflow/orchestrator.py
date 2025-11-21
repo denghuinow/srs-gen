@@ -52,9 +52,26 @@ class WorkflowOrchestrator:
     
     def _explore_node(self, state: WorkflowState) -> WorkflowState:
         """挖掘节点"""
-        # 注意：iteration_count的递增现在在_check_convergence中统一处理，
-        # 这里不再需要递增，避免重复递增
-        # 保留此代码块用于日志记录（如果需要）
+        # 注意：iteration_count的递增现在在explore节点开始时统一处理
+        # 如果score_history中有记录，说明已经完成了一轮迭代（包括clarify），此时iteration_count应该>=1
+        # 如果仍然是0，说明从_check_convergence返回时状态没有正确传递，需要手动修复
+        # 第一次调用explore时，score_history为空，iteration_count=0，不需要递增
+        
+        # 检查是否需要修复计数器
+        # 如果score_history中有任何记录，说明已经完成了一轮迭代（包括clarify），此时iteration_count应该>max_iteration_in_history
+        # 如果iteration_count <= max_iteration_in_history，说明状态没有正确传递，需要手动修复
+        if state["score_history"].history:
+            max_iteration_in_history = max(
+                max((r.iteration for r in records), default=0)
+                for records in state["score_history"].history.values()
+            )
+            # 如果iteration_count <= max_iteration_in_history，说明状态没有正确传递
+            # 应该设置为max_iteration_in_history + 1
+            if state["iteration_count"] <= max_iteration_in_history:
+                expected_iteration = max_iteration_in_history + 1
+                old_iteration = state["iteration_count"]
+                state["iteration_count"] = expected_iteration
+                self.logger.warning(f"检测到状态传递问题：score_history中最大iteration={max_iteration_in_history}，但iteration_count={old_iteration}，手动修复到{expected_iteration}")
 
         raw_input = state["raw_input"]
         baseline_requirement_structure = state.get("baseline_requirement_structure", "")  # type: ignore
@@ -286,15 +303,20 @@ class WorkflowOrchestrator:
         
         # 检查是否达到最大迭代次数（从状态中获取，如果未设置则使用配置默认值）
         max_iterations = state.get("max_iterations", Config.MAX_ITERATIONS)  # type: ignore
-        if state["iteration_count"] >= max_iterations:
-            state["convergence_reached"] = True
-            self.logger.info(f"[迭代 {iteration}] 收敛判断: 达到最大迭代次数 ({max_iterations})")
-            return "generate"
         
-        # 继续迭代：递增迭代号（即使clarify失败也要递增，防止无限循环）
-        # 注意：这里递增iteration_count，确保即使_explore_node中的条件不满足也能递增
+        # 继续迭代：先递增迭代号，再检查是否达到最大迭代次数
+        # 注意：这里递增iteration_count，确保下次进入explore节点时使用正确的迭代号
         state["iteration_count"] += 1
         next_iteration = state["iteration_count"]
+        
+        if next_iteration >= max_iterations:
+            state["convergence_reached"] = True
+            self.logger.info(f"[迭代 {iteration}] 收敛判断: 达到最大迭代次数 ({max_iterations})，下一迭代将是 {next_iteration}，停止迭代")
+            # 注意：虽然已经递增了，但这里返回generate，所以不会进入下一轮explore
+            # 为了保持一致性，我们需要将计数器减回去，或者接受这个不一致
+            # 实际上，由于返回generate，不会进入explore，所以这个递增不会影响最终结果
+            return "generate"
+        
         negative_info = "存在负分条目" if has_negative else "无负分条目"
         self.logger.info(f"[迭代 {iteration}] 收敛判断: {negative_info}，继续迭代 -> 迭代 {next_iteration}（强制迭代到最大次数 {max_iterations}）")
         return "continue"
