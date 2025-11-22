@@ -9,6 +9,11 @@ from ..utils.logger import get_logger
 from ..utils.streaming import stream_with_continuation
 from ..utils.prompt_loader import PromptLoader
 from ..utils.token_counter import count_text_tokens
+from ..utils.score_definitions import (
+    VALID_SCORES,
+    format_score_for_message,
+    get_processing_instructions
+)
 
 
 class ReqExploreAgent:
@@ -93,13 +98,27 @@ class ReqExploreAgent:
                             score_groups[result.score] = []
                         score_groups[result.score].append(result.req_id)
                     
-                    # 按分数从高到低排序生成消息
+                    # 按分数从高到低排序生成消息，包含所有分数情况
                     score_message_lines = []
-                    for score in sorted(score_groups.keys(), reverse=True):
-                        score_message_lines.append(f"Score: {score}")
-                        for req_id in sorted(score_groups[score]):
-                            score_message_lines.append(f"- {req_id}")
-                        score_message_lines.append("")  # 添加空行分隔不同分数组
+                    score_message_lines.append("需求评分结果：")
+                    score_message_lines.append("")
+                    
+                    for score in sorted(VALID_SCORES, reverse=True):
+                        req_ids = sorted(score_groups.get(score, []))
+                        
+                        # 只显示有需求的分数情况
+                        if req_ids:
+                            score_message_lines.append(format_score_for_message(score))
+                            for req_id in req_ids:
+                                score_message_lines.append(f"- {req_id}")
+                            score_message_lines.append("")  # 添加空行分隔不同分数组
+                    
+                    # 添加任务说明（使用统一的处理方式说明）
+                    score_message_lines.append("任务要求：")
+                    instructions = get_processing_instructions()
+                    for i, instruction in enumerate(instructions, 1):
+                        score_message_lines.append(f"{i}. {instruction}")
+                    score_message_lines.append(f"{len(instructions) + 1}. 在改进现有需求的同时，必须生成至少 {new_req_count} 个新增需求（从 {next_id} 开始）")
                     
                     score_message = "\n".join(score_message_lines).strip()
                     messages.append({"role": "user", "content": score_message})

@@ -11,6 +11,11 @@ from ..utils.logger import get_logger
 from ..utils.streaming import stream_with_continuation
 from ..utils.prompt_loader import PromptLoader
 from ..utils.token_counter import count_text_tokens
+from ..utils.score_definitions import (
+    SCORE_MEANINGS,
+    VALID_SCORES,
+    format_score_for_log
+)
 
 
 class ReqClarifyAgent:
@@ -112,8 +117,8 @@ class ReqClarifyAgent:
             self.logger.debug("完整响应内容:")
             self.logger.debug(content)
             
-            # 解析 TSV 格式输出
-            score_distribution = {2: 0, 1: 0, 0: 0, -1: 0, -2: 0}
+            # 解析 TSV 格式输出（使用统一的评分定义）
+            score_distribution = {score: 0 for score in VALID_SCORES}
             
             # 尝试提取 TSV 内容（可能在代码块中）
             tsv_content = content
@@ -259,13 +264,12 @@ class ReqClarifyAgent:
                         evidence=None
                     ))
             
-            # 记录评分结果统计
+            # 记录评分结果统计（使用统一的评分定义）
             self.logger.info("评分结果统计:")
-            self.logger.info(f"  +2 (高度一致): {score_distribution[2]}")
-            self.logger.info(f"  +1 (基本一致): {score_distribution[1]}")
-            self.logger.info(f"  0 (中性): {score_distribution[0]}")
-            self.logger.info(f"  -1 (轻微冲突): {score_distribution[-1]}")
-            self.logger.info(f"  -2 (明确冲突): {score_distribution[-2]}")
+            for score in sorted(VALID_SCORES, reverse=True):
+                count = score_distribution[score]
+                meaning = SCORE_MEANINGS[score]
+                self.logger.info(f"  {format_score_for_log(score)}: {count}")
             
             negative_count = score_distribution[-1] + score_distribution[-2]
             if negative_count > 0:
