@@ -57,40 +57,12 @@ class WorkflowOrchestrator:
     
     def _explore_node(self, state: WorkflowState) -> WorkflowState:
         """挖掘节点"""
-        # 修复迭代次数：根据score_history确定正确的迭代次数
-        # 如果score_history中有记录，说明已经完成了一轮迭代（包括clarify）
-        # 此时应该根据score_history中的最大迭代次数来确定当前迭代次数
-        current_iteration = state["iteration_count"]
+        # 如果不是第一次迭代（有score_history记录），递增迭代次数
+        # 迭代从1开始，第一次调用时已经是1，不需要递增
         has_history = bool(state["score_history"].history)
-        self.logger.debug(
-            f"进入explore_node：当前iteration_count={current_iteration}，"
-            f"score_history是否为空={not has_history}"
-        )
-        
         if has_history:
-            max_iteration_in_history = max(
-                max((r.iteration for r in records), default=0)
-                for records in state["score_history"].history.values()
-            )
-            # 当前迭代次数应该是 max_iteration_in_history + 1
-            # 因为score_history记录的是已经完成的迭代，下一次迭代应该是 max_iteration + 1
-            expected_iteration = max_iteration_in_history + 1
-            self.logger.debug(
-                f"score_history中最大iteration={max_iteration_in_history}，"
-                f"期望的iteration_count={expected_iteration}"
-            )
-            if current_iteration != expected_iteration:
-                old_iteration = current_iteration
-                state["iteration_count"] = expected_iteration
-                self.logger.warning(
-                    f"修复迭代次数：score_history中最大iteration={max_iteration_in_history}，"
-                    f"但iteration_count={old_iteration}，修复到{expected_iteration}"
-                )
-        else:
-            # 如果score_history为空，说明这是第一次迭代，iteration_count应该是0
-            # 此时不需要修复
-            self.logger.debug(f"第一次迭代：score_history为空，iteration_count={current_iteration}")
-
+            state["iteration_count"] += 1
+        
         raw_input = state["raw_input"]
         baseline_requirement_structure = state.get("baseline_requirement_structure", "")  # type: ignore
 
@@ -337,17 +309,13 @@ class WorkflowOrchestrator:
         # 检查是否达到最大迭代次数（从状态中获取，如果未设置则使用配置默认值）
         max_iterations = state.get("max_iterations", Config.MAX_ITERATIONS)  # type: ignore
         
-        # 继续迭代：先递增迭代号，再检查是否达到最大迭代次数
-        # 注意：这里递增iteration_count，确保下次进入explore节点时使用正确的迭代号
-        state["iteration_count"] += 1
-        next_iteration = state["iteration_count"]
+        # 计算下一轮迭代的迭代号（当前迭代号+1）
+        next_iteration = iteration + 1
         
-        if next_iteration >= max_iterations:
+        # 如果下一轮迭代号超过最大迭代次数，则停止（迭代从1开始）
+        if next_iteration > max_iterations:
             state["convergence_reached"] = True
             self.logger.info(f"[迭代 {iteration}] 收敛判断: 达到最大迭代次数 ({max_iterations})，下一迭代将是 {next_iteration}，停止迭代")
-            # 注意：虽然已经递增了，但这里返回generate，所以不会进入下一轮explore
-            # 为了保持一致性，我们需要将计数器减回去，或者接受这个不一致
-            # 实际上，由于返回generate，不会进入explore，所以这个递增不会影响最终结果
             return "generate"
         
         negative_info = "存在负分条目" if has_negative else "无负分条目"
@@ -358,13 +326,13 @@ class WorkflowOrchestrator:
         """生成节点"""
         agent = DocGenerateAgent(self.client, state["timer_manager"], prompt_version=self.prompt_version)
         
-        # 基于历史得分筛选：只要历史中曾经有过>0的得分，就进入文档生成
+        # 基于历史得分筛选：只要历史中曾经有过>=1的得分，就进入文档生成
         filtered_requirements = RequirementList()
         excluded_ids = []
         
         for req in state["requirements"].requirements:
             best_score = state["score_history"].get_best_score(req.id)
-            if best_score is not None and best_score > 0:
+            if best_score is not None and best_score >= 1:
                 filtered_requirements.requirements.append(req)
             else:
                 excluded_ids.append(req.id)
@@ -373,7 +341,7 @@ class WorkflowOrchestrator:
         total_count = len(state["requirements"].requirements)
         filtered_count = len(filtered_requirements.requirements)
         if total_count != filtered_count:
-            self.logger.info(f"文档生成：从 {total_count} 个需求中筛选出 {filtered_count} 个历史得分>0的需求")
+            self.logger.info(f"文档生成：从 {total_count} 个需求中筛选出 {filtered_count} 个历史得分>=1的需求")
             if excluded_ids:
                 self.logger.debug(f"被排除的需求ID: {sorted(excluded_ids)}")
         
@@ -442,7 +410,7 @@ class WorkflowOrchestrator:
             "requirements": RequirementList(),
             "score_history": ScoreHistory(),
             "timer_manager": TimerManager(),
-            "iteration_count": 0,
+            "iteration_count": 1,  # 迭代从1开始
             "ablation_mode": ablation_mode,
             "convergence_reached": False,
             "max_iterations": max_iterations if max_iterations is not None else Config.MAX_ITERATIONS,  # type: ignore

@@ -1,11 +1,15 @@
-You are an expert in creating Software Requirements Specification (SRS) documents. 
-Generate a comprehensive SRS document based on the following information:
+你是一位创建软件需求规格说明书（SRS）文档的专家。
+请严格基于我提供的信息生成一份全面的 SRS 文档，不得虚构、补充或推测任何未在输入中出现的内容。
 
-Project Summary: {raw_input}
-Requirements: {requirements_text}
-Style Profile: {style_profile}
-Context Examples: {context_examples}
+输入信息如下：
 
-Ensure the document follows professional SRS standards with proper sections, formatting, and technical accuracy. 
-            Use markdown formatting with appropriate headers, lists, and code blocks where necessary.
+项目概述：{raw_input}
 
+需求：{requirements_text}
+
+风格配置：{style_profile}
+
+上下文示例：{context_examples}
+
+请确保文档遵循专业的 SRS 标准，包含合理的章节结构、规范的格式与技术准确性。
+使用 Markdown 编写，包含恰当的标题、列表，必要时使用代码块。

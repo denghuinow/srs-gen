@@ -98,6 +98,13 @@ class ReqExploreAgent:
                             score_groups[result.score] = []
                         score_groups[result.score].append(result.req_id)
                     
+                    # 计算待改进需求数（评分 <= 0）
+                    needs_improvement_count = sum(
+                        len(req_ids) 
+                        for score, req_ids in score_groups.items() 
+                        if score <= 0
+                    )
+                    
                     # 按分数从高到低排序生成消息，包含所有分数情况
                     score_message_lines = []
                     score_message_lines.append("需求评分结果：")
@@ -118,7 +125,15 @@ class ReqExploreAgent:
                     instructions = get_processing_instructions()
                     for i, instruction in enumerate(instructions, 1):
                         score_message_lines.append(f"{i}. {instruction}")
-                    score_message_lines.append(f"{len(instructions) + 1}. 在改进现有需求的同时，必须生成至少 {new_req_count} 个新增需求（从 {next_id} 开始）")
+                    
+                    # 如果待改进需求数超过max_new_requirements_per_iteration，则不要求生成新需求
+                    if needs_improvement_count < new_req_count:
+                        score_message_lines.append(f"{len(instructions) + 1}. 在改进现有需求的同时，必须生成至少 {new_req_count} 个新增需求（从 {next_id} 开始）")
+                    else:
+                        self.logger.info(
+                            f"待改进需求数 ({needs_improvement_count}) >= 新需求数量要求 ({new_req_count})，"
+                            f"本次反馈不要求生成新需求，专注于改进现有需求"
+                        )
                     
                     score_message = "\n".join(score_message_lines).strip()
                     messages.append({"role": "user", "content": score_message})
@@ -155,6 +170,9 @@ class ReqExploreAgent:
             if not content:
                 self.logger.warning("API响应为空，返回现有需求")
                 return (existing_requirements, messages)
+            
+            # 将 assistant 的回复追加到对话历史中，以便下次迭代时使用
+            messages.append({"role": "assistant", "content": content})
 
             self.logger.debug("完整响应内容:")
             self.logger.debug(content)
@@ -165,6 +183,7 @@ class ReqExploreAgent:
 
             added_ids = []
             updated_ids = []
+            processed_ids_in_response = set()  # 用于检测响应中的重复ID
             lines = content.split("\n")
             i = 0
             current_req_id = None
@@ -177,6 +196,16 @@ class ReqExploreAgent:
                 if line == "---" or line.startswith("---"):
                     # 如果当前正在收集需求文本，分隔符表示需求结束
                     if current_req_id and current_req_text_lines:
+                        # 检测响应中的重复ID（在本次响应中已经出现过的ID）
+                        if current_req_id in processed_ids_in_response:
+                            self.logger.warning(
+                                f"检测到重复的需求ID（在模型响应中重复出现）: {current_req_id}，跳过处理以避免重复"
+                            )
+                            current_req_id = None
+                            current_req_text_lines = []
+                            i += 1
+                            continue
+                        
                         req_text = "\n".join(current_req_text_lines).strip()
                         if req_text:
                             # 检查原需求的score，如果score == 2则保留，否则设为None以便重新评分
@@ -196,6 +225,8 @@ class ReqExploreAgent:
                                     updated_ids.append(current_req_id)
                                 else:
                                     added_ids.append(current_req_id)
+                                # 记录已处理的需求ID
+                                processed_ids_in_response.add(current_req_id)
 
                         current_req_id = None
                         current_req_text_lines = []
@@ -231,6 +262,18 @@ class ReqExploreAgent:
                     if req_id_clean.startswith("REQ-"):
                         # 使用清理后的ID作为需求ID
                         req_id = req_id_clean
+                        
+                        # 检测响应中的重复ID（在本次响应中已经出现过的ID）
+                        if req_id in processed_ids_in_response:
+                            self.logger.warning(
+                                f"检测到重复的需求ID（在模型响应中重复出现）: {req_id}，跳过处理以避免重复"
+                            )
+                            # 跳过这个重复的需求，继续处理下一行
+                            current_req_id = None
+                            current_req_text_lines = []
+                            i += 1
+                            continue
+                        
                         # 保存之前的需求（如果有）
                         if current_req_id and current_req_text_lines:
                             req_text = "\n".join(current_req_text_lines).strip()
@@ -277,25 +320,33 @@ class ReqExploreAgent:
 
             # 处理最后一个需求（如果存在）
             if current_req_id and current_req_text_lines:
-                req_text = "\n".join(current_req_text_lines).strip()
-                if req_text:
-                    # 检查原需求的score，如果score == 2则保留，否则设为None以便重新评分
-                    original_score = None
-                    for existing_req in existing_requirements.requirements:
-                        if existing_req.id == current_req_id and existing_req.score == 2:
-                            original_score = 2
-                            break
-                    
-                    req = Requirement(
-                        id=current_req_id, text=req_text, iteration=iteration, score=original_score
+                # 检测响应中的重复ID（在本次响应中已经出现过的ID）
+                if current_req_id in processed_ids_in_response:
+                    self.logger.warning(
+                        f"检测到重复的需求ID（在模型响应中重复出现）: {current_req_id}，跳过处理以避免重复"
                     )
+                else:
+                    req_text = "\n".join(current_req_text_lines).strip()
+                    if req_text:
+                        # 检查原需求的score，如果score == 2则保留，否则设为None以便重新评分
+                        original_score = None
+                        for existing_req in existing_requirements.requirements:
+                            if existing_req.id == current_req_id and existing_req.score == 2:
+                                original_score = 2
+                                break
+                        
+                        req = Requirement(
+                            id=current_req_id, text=req_text, iteration=iteration, score=original_score
+                        )
 
-                    success, is_update = new_requirements.update_or_add(req)
-                    if success:
-                        if is_update:
-                            updated_ids.append(current_req_id)
-                        else:
-                            added_ids.append(current_req_id)
+                        success, is_update = new_requirements.update_or_add(req)
+                        if success:
+                            if is_update:
+                                updated_ids.append(current_req_id)
+                            else:
+                                added_ids.append(current_req_id)
+                            # 记录已处理的需求ID
+                            processed_ids_in_response.add(current_req_id)
 
             existing_ids_after = set(req.id for req in new_requirements.requirements)
             new_ids = existing_ids_after - existing_ids_before
