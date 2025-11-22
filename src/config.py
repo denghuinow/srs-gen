@@ -67,7 +67,7 @@ class Config:
         return None
     
     @classmethod
-    def get_temperature_req_parse(cls) -> float:
+    def get_temperature_req_parse(cls) -> Optional[float]:
         """获取需求解析智能体的温度参数"""
         temp_str = os.getenv("TEMPERATURE_REQ_PARSE")
         if temp_str:
@@ -75,10 +75,10 @@ class Config:
                 return float(temp_str)
             except ValueError:
                 pass
-        return 0.6  # 默认值
+        return None  # 未配置时返回 None，使用 API 默认值
     
     @classmethod
-    def get_temperature_req_explore(cls) -> float:
+    def get_temperature_req_explore(cls) -> Optional[float]:
         """获取需求挖掘智能体的温度参数"""
         temp_str = os.getenv("TEMPERATURE_REQ_EXPLORE")
         if temp_str:
@@ -86,10 +86,10 @@ class Config:
                 return float(temp_str)
             except ValueError:
                 pass
-        return 0.7  # 默认值
+        return None  # 未配置时返回 None，使用 API 默认值
     
     @classmethod
-    def get_temperature_req_clarify(cls) -> float:
+    def get_temperature_req_clarify(cls) -> Optional[float]:
         """获取需求澄清智能体的温度参数"""
         temp_str = os.getenv("TEMPERATURE_REQ_CLARIFY")
         if temp_str:
@@ -97,10 +97,10 @@ class Config:
                 return float(temp_str)
             except ValueError:
                 pass
-        return 0.0  # 默认值
+        return None  # 未配置时返回 None，使用 API 默认值
     
     @classmethod
-    def get_temperature_doc_generate(cls) -> float:
+    def get_temperature_doc_generate(cls) -> Optional[float]:
         """获取文档生成智能体的温度参数"""
         temp_str = os.getenv("TEMPERATURE_DOC_GENERATE")
         if temp_str:
@@ -108,7 +108,7 @@ class Config:
                 return float(temp_str)
             except ValueError:
                 pass
-        return 0.0  # 默认值
+        return None  # 未配置时返回 None，使用 API 默认值
     
     @classmethod
     def get_model_req_parse(cls) -> str:

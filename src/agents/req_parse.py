@@ -6,6 +6,7 @@ from ..utils.timer import TimerManager
 from ..utils.logger import get_logger
 from ..utils.streaming import stream_with_continuation
 from ..utils.prompt_loader import PromptLoader
+from ..utils.token_counter import count_text_tokens
 
 
 class ReqParseAgent:
@@ -29,12 +30,11 @@ class ReqParseAgent:
         self.timer.start()
 
         try:
-            self.logger.info(f"开始生成需求语义单元（{input_type}），输入长度: {len(raw_input)} 字符")
-            self.logger.debug(
-                f"输入文本摘要: {raw_input[:200]}..."
-                if len(raw_input) > 200
-                else f"输入文本: {raw_input}"
-            )
+            raw_input_tokens = count_text_tokens(raw_input)
+            raw_input_token_str = f"{raw_input_tokens} tokens" if raw_input_tokens is not None else f"{len(raw_input)} 字符"
+            self.logger.info(f"开始生成需求语义单元（{input_type}），输入长度: {raw_input_token_str}")
+            self.logger.debug("输入文本:")
+            self.logger.debug(raw_input)
 
             # 使用提示词加载器加载并格式化提示词
             # 注意：虽然方法参数名是 raw_input，但实际来源是命令行参数 --baseline-gend-srs
@@ -57,8 +57,11 @@ class ReqParseAgent:
             # 构建API调用基础参数
             base_api_params = {
                 "model": Config.get_model_req_parse(),
-                "temperature": Config.get_temperature_req_parse(),
             }
+            # 只有当 temperature 配置了值时才添加到参数中
+            temperature = Config.get_temperature_req_parse()
+            if temperature is not None:
+                base_api_params["temperature"] = temperature
             max_tokens = Config.get_max_tokens()
             if max_tokens is not None:
                 base_api_params["max_tokens"] = max_tokens
@@ -77,8 +80,7 @@ class ReqParseAgent:
             # 记录完整响应内容
             if content:
                 self.logger.debug("完整响应内容:")
-                for line in content.split("\n"):
-                    self.logger.debug(f"  {line}")
+                self.logger.debug(content)
 
                 # 清理可能的代码块包裹
                 requirement_semantic_unit = content.strip()
@@ -91,8 +93,10 @@ class ReqParseAgent:
                     else:
                         requirement_semantic_unit = ""
 
+                requirement_tokens = count_text_tokens(requirement_semantic_unit)
+                requirement_token_str = f"{requirement_tokens} tokens" if requirement_tokens is not None else f"{len(requirement_semantic_unit)} 字符"
                 self.logger.info(
-                    f"需求语义单元生成完成，长度: {len(requirement_semantic_unit)} 字符"
+                    f"需求语义单元生成完成，长度: {requirement_token_str}"
                 )
                 return requirement_semantic_unit
             else:

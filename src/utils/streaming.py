@@ -6,7 +6,7 @@ from openai import OpenAI, APIError, APITimeoutError, InternalServerError
 
 from ..config import Config
 from .logger import get_logger
-from .token_counter import calculate_adjusted_max_tokens, count_tokens
+from .token_counter import calculate_adjusted_max_tokens, count_tokens, count_text_tokens
 
 logger = get_logger("Streaming")
 
@@ -38,6 +38,10 @@ def request_stream_completion(client: OpenAI, api_params: dict) -> Tuple[str, st
             
             content_parts = []
             finish_reason = "stop"
+            usage_data = None
+            
+            # 记录请求开始时间
+            start_time = time.time()
             stream_response = client.chat.completions.create(**api_params)
             
             try:
@@ -49,21 +53,60 @@ def request_stream_completion(client: OpenAI, api_params: dict) -> Tuple[str, st
                         sys.stdout.flush()
                     if chunk.choices and chunk.choices[0].finish_reason:
                         finish_reason = chunk.choices[0].finish_reason
+                    # 检查是否有 usage 信息（通常在最后一个 chunk 中）
+                    if hasattr(chunk, 'usage') and chunk.usage:
+                        usage_data = chunk.usage
             except Exception as stream_error:
                 # 流式响应处理过程中的错误也需要重试
                 # 如果已经收集到部分内容，记录日志但不保留（因为流可能不完整）
                 if content_parts:
-                    logger.warning(f"流式响应处理中断，已收集 {len(''.join(content_parts))} 字符，将重试...")
+                    collected_text = ''.join(content_parts)
+                    collected_tokens = count_text_tokens(collected_text)
+                    token_str = f"{collected_tokens} tokens" if collected_tokens is not None else f"{len(collected_text)} 字符"
+                    logger.warning(f"流式响应处理中断，已收集 {token_str}，将重试...")
                 # 重新抛出异常以便外层重试逻辑处理
                 raise stream_error
             
             sys.stdout.write("\n")
             sys.stdout.flush()
             
+            # 计算耗时和 token/s
+            elapsed_time = time.time() - start_time
+            final_content = "".join(content_parts)
+            
+            # 获取生成的 token 数量
+            completion_tokens = None
+            if usage_data and hasattr(usage_data, 'completion_tokens'):
+                completion_tokens = usage_data.completion_tokens
+            else:
+                # 如果没有 usage 信息，通过 tokenizer 计算
+                completion_tokens = count_text_tokens(final_content)
+            
+            # 计算并记录 token/s
+            if completion_tokens is not None and elapsed_time > 0:
+                tokens_per_second = completion_tokens / elapsed_time
+                logger.info(f"API生成速度: {tokens_per_second:.2f} token/s (生成 {completion_tokens} tokens, 耗时 {elapsed_time:.2f}秒)")
+            elif completion_tokens is not None:
+                logger.info(f"API生成完成: {completion_tokens} tokens (耗时 {elapsed_time:.2f}秒)")
+            
+            # 记录完整的 token 使用情况（如果有）
+            if usage_data:
+                prompt_tokens = getattr(usage_data, 'prompt_tokens', None)
+                total_tokens = getattr(usage_data, 'total_tokens', None)
+                if prompt_tokens is not None or total_tokens is not None:
+                    token_info = []
+                    if prompt_tokens is not None:
+                        token_info.append(f"prompt_tokens: {prompt_tokens}")
+                    if completion_tokens is not None:
+                        token_info.append(f"completion_tokens: {completion_tokens}")
+                    if total_tokens is not None:
+                        token_info.append(f"total_tokens: {total_tokens}")
+                    logger.info(f"Token使用 - {', '.join(token_info)}")
+            
             if attempt > 0:
                 logger.info(f"重试成功（第 {attempt + 1} 次尝试）")
             
-            return "".join(content_parts), finish_reason
+            return final_content, finish_reason
             
         except (InternalServerError, APITimeoutError) as e:
             # 对于500错误和超时错误，进行重试
@@ -226,9 +269,24 @@ def stream_with_continuation(
             content_parts.append(content)
             # 记录接续后新增的内容（用于调试）
             if auto_continue_attempts > 0:
-                logger.debug(f"接续后新增内容（长度: {len(content)}字符）:")
+                content_tokens = count_text_tokens(content)
+                content_token_str = f"{content_tokens} tokens" if content_tokens is not None else f"{len(content)} 字符"
+                logger.debug(f"接续后新增内容（长度: {content_token_str}）:")
                 logger.debug("=" * 80)
-                logger.debug(content[:500] + ("..." if len(content) > 500 else ""))
+                logger.debug(content)
+                logger.debug("=" * 80)
+                
+                # 记录接续后合并的内容（最后500字符，用于验证接续是否连贯）
+                combined_text_after = "".join(content_parts)
+                preview_length = 500
+                after_text = combined_text_after[-preview_length:] if len(combined_text_after) > preview_length else combined_text_after
+                after_text_tokens = count_text_tokens(after_text)
+                combined_tokens = count_text_tokens(combined_text_after)
+                after_token_str = f"{after_text_tokens} tokens" if after_text_tokens is not None else f"{len(after_text)} 字符"
+                combined_token_str = f"{combined_tokens} tokens" if combined_tokens is not None else f"{len(combined_text_after)} 字符"
+                logger.debug(f"接续后合并内容（最后{after_token_str}，总长度{combined_token_str}）:")
+                logger.debug("=" * 80)
+                logger.debug(after_text)
                 logger.debug("=" * 80)
         
         if finish_reason != "length":
@@ -246,7 +304,11 @@ def stream_with_continuation(
         combined_text = "".join(content_parts)
         preview_length = 500
         before_text = combined_text[-preview_length:] if len(combined_text) > preview_length else combined_text
-        logger.debug(f"接续前内容（最后{len(before_text)}字符，总长度{len(combined_text)}字符）:")
+        before_text_tokens = count_text_tokens(before_text)
+        combined_tokens = count_text_tokens(combined_text)
+        before_token_str = f"{before_text_tokens} tokens" if before_text_tokens is not None else f"{len(before_text)} 字符"
+        combined_token_str = f"{combined_tokens} tokens" if combined_tokens is not None else f"{len(combined_text)} 字符"
+        logger.debug(f"接续前内容（最后{before_token_str}，总长度{combined_token_str}）:")
         logger.debug("=" * 80)
         logger.debug(before_text)
         logger.debug("=" * 80)
@@ -274,16 +336,10 @@ def stream_with_continuation(
         
         # 更新 messages 用于下一次请求
         messages = continuation_messages
-        
-        # 记录合并后的内容（最后500字符，用于验证接续是否连贯）
-        combined_text_after = "".join(content_parts)
-        after_text = combined_text_after[-preview_length:] if len(combined_text_after) > preview_length else combined_text_after
-        logger.debug(f"接续后合并内容（最后{len(after_text)}字符，总长度{len(combined_text_after)}字符）:")
-        logger.debug("=" * 80)
-        logger.debug(after_text)
-        logger.debug("=" * 80)
     
     final_content = "".join(content_parts)
-    logger.info(f"{task_name} 完成，总长度: {len(final_content)} 字符，接续次数: {auto_continue_attempts}")
+    final_tokens = count_text_tokens(final_content)
+    final_token_str = f"{final_tokens} tokens" if final_tokens is not None else f"{len(final_content)} 字符"
+    logger.info(f"{task_name} 完成，总长度: {final_token_str}，接续次数: {auto_continue_attempts}")
     return final_content
 

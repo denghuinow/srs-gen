@@ -1,6 +1,6 @@
 """工作流状态管理"""
 from typing import TypedDict, List, Optional
-from ..models.requirement import RequirementList
+from ..models.requirement import RequirementList, ClarificationResult
 from ..utils.score_history import ScoreHistory
 from ..utils.timer import TimerManager
 
@@ -21,3 +21,5 @@ class WorkflowState(TypedDict, total=False):
     requirement_structure: str  # 需求结构（Markdown格式）
     baseline_requirement_structure: str  # 基准需求语义单元（通过ReqParseAgent解析baseline_gend_srs得到）
     _srs_document: str  # 临时存储生成的SRS文档
+    req_explore_messages: Optional[List[dict]]  # ReqExploreAgent 的对话历史
+    clarification_results: Optional[List[ClarificationResult]]  # 评分结果，用于在 explore 和 clarify 之间传递

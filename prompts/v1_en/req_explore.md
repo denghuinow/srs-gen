@@ -5,10 +5,7 @@ Complete two tasks based on the following information:
 
 **Customer's Original Requirements Document:**
 {raw_input}
-**Requirements Analysis Reference Baseline:**
 {baseline_requirement_structure}
-**Analyzed Requirements List (with scores):**
-{existing_requirements_list}
 
 Requirements:
 1. **Complete Coverage Principle**: The generated requirements list must completely cover all content points, functional points, scenarios, and constraints in the customer's original requirements document. Please carefully analyze the customer's original requirements document to ensure that each key element has a corresponding requirement entry, and do not omit any important content.

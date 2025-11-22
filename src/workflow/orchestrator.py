@@ -12,6 +12,7 @@ from ..agents.req_clarify import ReqClarifyAgent
 from ..agents.doc_generate import DocGenerateAgent
 from ..utils.comparison import ComparisonReporter
 from ..utils.logger import get_logger
+from ..utils.token_counter import count_text_tokens
 
 
 class WorkflowOrchestrator:
@@ -36,7 +37,9 @@ class WorkflowOrchestrator:
         
         # requirement_structure 直接使用 raw_input，不再通过 ReqParseAgent 解析
         state["requirement_structure"] = state["raw_input"]  # type: ignore
-        self.logger.info(f"需求结构直接使用用户输入，长度: {len(state['raw_input'])} 字符")
+        raw_input_tokens = count_text_tokens(state['raw_input'])
+        raw_input_token_str = f"{raw_input_tokens} tokens" if raw_input_tokens is not None else f"{len(state['raw_input'])} 字符"
+        self.logger.info(f"需求结构直接使用用户输入，长度: {raw_input_token_str}")
         
         # 如果存在 baseline_gend_srs，使用 ReqParseAgent 解析它生成需求语义单元
         baseline_gend_srs = state.get("baseline_gend_srs", "")
@@ -44,7 +47,9 @@ class WorkflowOrchestrator:
             agent = ReqParseAgent(self.client, self.timer_manager, prompt_version=self.prompt_version)
             baseline_requirement_structure = agent.parse(baseline_gend_srs, input_type="基准生成的SRS")
             state["baseline_requirement_structure"] = baseline_requirement_structure  # type: ignore
-            self.logger.info(f"基准需求语义单元生成完成，长度: {len(baseline_requirement_structure)} 字符")
+            baseline_tokens = count_text_tokens(baseline_requirement_structure)
+            baseline_token_str = f"{baseline_tokens} tokens" if baseline_tokens is not None else f"{len(baseline_requirement_structure)} 字符"
+            self.logger.info(f"基准需求语义单元生成完成，长度: {baseline_token_str}")
         else:
             state["baseline_requirement_structure"] = ""  # type: ignore
         
@@ -52,26 +57,39 @@ class WorkflowOrchestrator:
     
     def _explore_node(self, state: WorkflowState) -> WorkflowState:
         """挖掘节点"""
-        # 注意：iteration_count的递增现在在explore节点开始时统一处理
-        # 如果score_history中有记录，说明已经完成了一轮迭代（包括clarify），此时iteration_count应该>=1
-        # 如果仍然是0，说明从_check_convergence返回时状态没有正确传递，需要手动修复
-        # 第一次调用explore时，score_history为空，iteration_count=0，不需要递增
+        # 修复迭代次数：根据score_history确定正确的迭代次数
+        # 如果score_history中有记录，说明已经完成了一轮迭代（包括clarify）
+        # 此时应该根据score_history中的最大迭代次数来确定当前迭代次数
+        current_iteration = state["iteration_count"]
+        has_history = bool(state["score_history"].history)
+        self.logger.debug(
+            f"进入explore_node：当前iteration_count={current_iteration}，"
+            f"score_history是否为空={not has_history}"
+        )
         
-        # 检查是否需要修复计数器
-        # 如果score_history中有任何记录，说明已经完成了一轮迭代（包括clarify），此时iteration_count应该>max_iteration_in_history
-        # 如果iteration_count <= max_iteration_in_history，说明状态没有正确传递，需要手动修复
-        if state["score_history"].history:
+        if has_history:
             max_iteration_in_history = max(
                 max((r.iteration for r in records), default=0)
                 for records in state["score_history"].history.values()
             )
-            # 如果iteration_count <= max_iteration_in_history，说明状态没有正确传递
-            # 应该设置为max_iteration_in_history + 1
-            if state["iteration_count"] <= max_iteration_in_history:
-                expected_iteration = max_iteration_in_history + 1
-                old_iteration = state["iteration_count"]
+            # 当前迭代次数应该是 max_iteration_in_history + 1
+            # 因为score_history记录的是已经完成的迭代，下一次迭代应该是 max_iteration + 1
+            expected_iteration = max_iteration_in_history + 1
+            self.logger.debug(
+                f"score_history中最大iteration={max_iteration_in_history}，"
+                f"期望的iteration_count={expected_iteration}"
+            )
+            if current_iteration != expected_iteration:
+                old_iteration = current_iteration
                 state["iteration_count"] = expected_iteration
-                self.logger.warning(f"检测到状态传递问题：score_history中最大iteration={max_iteration_in_history}，但iteration_count={old_iteration}，手动修复到{expected_iteration}")
+                self.logger.warning(
+                    f"修复迭代次数：score_history中最大iteration={max_iteration_in_history}，"
+                    f"但iteration_count={old_iteration}，修复到{expected_iteration}"
+                )
+        else:
+            # 如果score_history为空，说明这是第一次迭代，iteration_count应该是0
+            # 此时不需要修复
+            self.logger.debug(f"第一次迭代：score_history为空，iteration_count={current_iteration}")
 
         raw_input = state["raw_input"]
         baseline_requirement_structure = state.get("baseline_requirement_structure", "")  # type: ignore
@@ -93,13 +111,25 @@ class WorkflowOrchestrator:
         else:
             agent = ReqExploreAgent(self.client, state["timer_manager"], prompt_version=self.prompt_version)
             max_new_requirements = state.get("max_new_requirements_per_iteration")  # type: ignore
-            state["requirements"] = agent.explore(
+            
+            # 从 state 获取对话历史和评分结果
+            req_explore_messages = state.get("req_explore_messages")  # type: ignore
+            clarification_results = state.get("clarification_results")  # type: ignore
+            
+            # 调用 explore，传入对话历史和评分结果
+            new_requirements, updated_messages = agent.explore(
                 raw_input,
                 state["requirements"],
                 state["iteration_count"],
                 baseline_requirement_structure,
-                max_new_requirements_per_iteration=max_new_requirements
+                max_new_requirements_per_iteration=max_new_requirements,
+                messages=req_explore_messages,
+                clarification_results=clarification_results
             )
+            
+            # 保存返回的需求清单和对话历史
+            state["requirements"] = new_requirements
+            state["req_explore_messages"] = updated_messages  # type: ignore
         
         # 记录挖掘后的需求ID集合
         req_ids_after = set(req.id for req in state["requirements"].requirements)
@@ -232,6 +262,9 @@ class WorkflowOrchestrator:
         
         agent = ReqClarifyAgent(self.client, state["timer_manager"], prompt_version=self.prompt_version)
         results = agent.clarify(state["requirements"], state["baseline_srs"])
+        
+        # 保存评分结果到 state，供下次 explore 使用
+        state["clarification_results"] = results  # type: ignore
         
         # 应用评分结果
         score_map = {r.req_id: r for r in results}
@@ -413,7 +446,9 @@ class WorkflowOrchestrator:
             "ablation_mode": ablation_mode,
             "convergence_reached": False,
             "max_iterations": max_iterations if max_iterations is not None else Config.MAX_ITERATIONS,  # type: ignore
-            "max_new_requirements_per_iteration": max_new_requirements_per_iteration  # type: ignore
+            "max_new_requirements_per_iteration": max_new_requirements_per_iteration,  # type: ignore
+            "req_explore_messages": None,  # type: ignore
+            "clarification_results": None  # type: ignore
         }
         
         # 开始计时

@@ -1,13 +1,14 @@
 """需求挖掘智能体 (FR-002)"""
 
-from typing import Optional
+from typing import Optional, Tuple, List
 from openai import OpenAI
 from ..config import Config
-from ..models.requirement import Requirement, RequirementList
+from ..models.requirement import Requirement, RequirementList, ClarificationResult
 from ..utils.timer import TimerManager
 from ..utils.logger import get_logger
 from ..utils.streaming import stream_with_continuation
 from ..utils.prompt_loader import PromptLoader
+from ..utils.token_counter import count_text_tokens
 
 
 class ReqExploreAgent:
@@ -28,45 +29,32 @@ class ReqExploreAgent:
         iteration: int,
         baseline_requirement_structure: str = "",
         max_new_requirements_per_iteration: Optional[int] = None,
-    ) -> RequirementList:
-        """挖掘补充需求"""
+        messages: Optional[List[dict]] = None,
+        clarification_results: Optional[List[ClarificationResult]] = None,
+    ) -> Tuple[RequirementList, List[dict]]:
+        """挖掘补充需求
+        
+        Args:
+            raw_input: 用户原始需求
+            existing_requirements: 现有需求清单
+            iteration: 迭代轮次
+            baseline_requirement_structure: 基准需求语义单元
+            max_new_requirements_per_iteration: 每轮迭代新增需求数量
+            messages: 对话历史（如果为None则初始化新的对话）
+            clarification_results: 上一轮的评分结果（如果提供则作为用户消息追加）
+        
+        Returns:
+            (RequirementList, List[dict]): 新的需求清单和更新后的对话历史
+        """
         self.timer.start()
 
         try:
             self.logger.info(f"开始挖掘需求（迭代 {iteration}）")
-            self.logger.info(f"用户原始需求长度: {len(raw_input)} 字符")
-            self.logger.debug(
-                f"用户原始需求预览: {raw_input[:300]}..."
-                if len(raw_input) > 300
-                else f"用户原始需求: {raw_input}"
-            )
             
-            if baseline_requirement_structure:
-                self.logger.info(f"基准需求语义单元长度: {len(baseline_requirement_structure)} 字符")
-                self.logger.debug(
-                    f"基准需求语义单元预览: {baseline_requirement_structure[:300]}..."
-                    if len(baseline_requirement_structure) > 300
-                    else f"基准需求语义单元: {baseline_requirement_structure}"
-                )
-
-            # 获取用于探索的现有需求（包含id、score和text，不包含reason - FR-013）
-            existing_for_explore = existing_requirements.get_for_explore()
-
             existing_ids_before = set(
                 req.id for req in existing_requirements.requirements
             )
             self.logger.info(f"现有需求数量: {len(existing_requirements.requirements)}")
-            if existing_for_explore:
-                self.logger.debug("现有需求及其评分:")
-                for req_info in existing_for_explore:
-                    req_text_preview = (
-                        req_info.get("text", "")[:100] + "..."
-                        if len(req_info.get("text", "")) > 100
-                        else req_info.get("text", "")
-                    )
-                    self.logger.debug(
-                        f"  {req_info['id']}: 评分 {req_info['score']} | 内容预览: {req_text_preview}"
-                    )
 
             # 获取下一个可用ID
             next_id = existing_requirements.get_next_id()
@@ -78,40 +66,57 @@ class ReqExploreAgent:
                 f"需要生成新需求数量: {new_req_count} (来源: {'参数指定' if max_new_requirements_per_iteration is not None else f'配置值 NEW_REQUIREMENTS_PER_ITERATION={Config.NEW_REQUIREMENTS_PER_ITERATION}'})"
             )
 
-            # 构建完整需求清单（包含id、评分、需求细节）
-            requirements_list = ""
-            if existing_for_explore:
-                for req_info in existing_for_explore:
-                    req_text = req_info.get("text", "")
-                    requirements_list += (
-                        f"- {req_info['id']}: 评分 {req_info['score']}\n{req_text}\n"
-                    )
-
-            # 使用提示词加载器加载并格式化提示词
-            prompt = self.prompt_loader.format(
-                "req_explore",
-                max_new_requirements_count=new_req_count,
-                raw_input=raw_input,
-                baseline_requirement_structure=baseline_requirement_structure,
-                existing_requirements_list=requirements_list,
-                next_requirement_id=next_id
-            )
-
-            # 记录完整请求内容
-            self.logger.debug("完整请求内容:")
-            self.logger.debug(f"  User: {prompt}")
+            # 处理多轮对话逻辑
+            if messages is None:
+                # 第一次调用：初始化新的对话
+                self.logger.info("初始化新的对话（第一次调用）")
+                # 使用提示词加载器加载并格式化提示词（不包含需求清单）
+                prompt = self.prompt_loader.format(
+                    "req_explore",
+                    max_new_requirements_count=new_req_count,
+                    raw_input=raw_input,
+                    baseline_requirement_structure=baseline_requirement_structure,
+                    next_requirement_id=next_id
+                )
+                messages = [{"role": "user", "content": prompt}]
+                self.logger.debug("完整请求内容:")
+                self.logger.debug(f"  User: {prompt}")
+            else:
+                # 后续调用：使用已有的对话历史
+                self.logger.info(f"继续已有对话（对话历史包含 {len(messages)} 条消息）")
+                # 如果提供了评分结果，格式化为用户消息并追加
+                if clarification_results:
+                    # 按分数分组
+                    score_groups = {}
+                    for result in clarification_results:
+                        if result.score not in score_groups:
+                            score_groups[result.score] = []
+                        score_groups[result.score].append(result.req_id)
+                    
+                    # 按分数从高到低排序生成消息
+                    score_message_lines = []
+                    for score in sorted(score_groups.keys(), reverse=True):
+                        score_message_lines.append(f"Score: {score}")
+                        for req_id in sorted(score_groups[score]):
+                            score_message_lines.append(f"- {req_id}")
+                        score_message_lines.append("")  # 添加空行分隔不同分数组
+                    
+                    score_message = "\n".join(score_message_lines).strip()
+                    messages.append({"role": "user", "content": score_message})
+                    self.logger.info(f"追加评分结果消息，包含 {len(clarification_results)} 个需求的评分")
+                    self.logger.debug(f"评分消息内容:\n{score_message}")
 
             # 始终使用流式响应
             self.logger.info("开始流式生成需求挖掘结果...")
 
-            # 构建消息列表用于续接
-            messages = [{"role": "user", "content": prompt}]
-
             # 构建API调用基础参数
             base_api_params = {
                 "model": Config.get_model_req_explore(),
-                "temperature": Config.get_temperature_req_explore(),
             }
+            # 只有当 temperature 配置了值时才添加到参数中
+            temperature = Config.get_temperature_req_explore()
+            if temperature is not None:
+                base_api_params["temperature"] = temperature
             max_tokens = Config.get_max_tokens()
             if max_tokens is not None:
                 base_api_params["max_tokens"] = max_tokens
@@ -130,11 +135,10 @@ class ReqExploreAgent:
             # 记录完整响应内容
             if not content:
                 self.logger.warning("API响应为空，返回现有需求")
-                return existing_requirements
+                return (existing_requirements, messages)
 
             self.logger.debug("完整响应内容:")
-            for line in content.split("\n"):
-                self.logger.debug(f"  {line}")
+            self.logger.debug(content)
 
             # 解析输出（支持多行需求描述）
             new_requirements = RequirementList()
@@ -291,7 +295,7 @@ class ReqExploreAgent:
             if updated_ids:
                 self.logger.info(f"更新需求ID: {sorted(updated_ids)}")
 
-            return new_requirements
+            return (new_requirements, messages)
 
         except Exception as e:
             self.logger.error(f"挖掘过程中发生错误: {e}", exc_info=True)

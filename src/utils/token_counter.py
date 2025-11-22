@@ -63,6 +63,26 @@ def _get_tokenizer():
     return getattr(_get_tokenizer, "_tokenizer", None)
 
 
+def count_text_tokens(text: str) -> Optional[int]:
+    """计算单个文本字符串的 token 数量
+    
+    Args:
+        text: 文本字符串
+    
+    Returns:
+        token 数量，如果无法计算则返回 None
+    """
+    tokenizer = _get_tokenizer()
+    if tokenizer is None:
+        return None
+    
+    try:
+        tokens = tokenizer.encode(text, add_special_tokens=False)
+        return len(tokens)
+    except Exception:
+        return None
+
+
 def count_tokens(messages: List[Dict[str, str]]) -> Optional[int]:
     """计算消息列表的 token 数量
     

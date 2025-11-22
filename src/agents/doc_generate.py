@@ -8,6 +8,7 @@ from ..utils.timer import TimerManager
 from ..utils.logger import get_logger
 from ..utils.streaming import stream_with_continuation
 from ..utils.prompt_loader import PromptLoader
+from ..utils.token_counter import count_text_tokens
 
 
 class DocGenerateAgent:
@@ -90,8 +91,11 @@ class DocGenerateAgent:
             # 构建API调用基础参数
             base_api_params = {
                 "model": Config.get_model_doc_generate(),
-                "temperature": Config.get_temperature_doc_generate(),
             }
+            # 只有当 temperature 配置了值时才添加到参数中
+            temperature = Config.get_temperature_doc_generate()
+            if temperature is not None:
+                base_api_params["temperature"] = temperature
 
             # 如果配置了MAX_TOKENS，则添加到参数中
             max_tokens = Config.get_max_tokens()
@@ -107,10 +111,11 @@ class DocGenerateAgent:
                 task_name="文档生成"
             )
             if generated_doc:
-                self.logger.info(f"文档生成完成，长度: {len(generated_doc)} 字符")
+                doc_tokens = count_text_tokens(generated_doc)
+                doc_token_str = f"{doc_tokens} tokens" if doc_tokens is not None else f"{len(generated_doc)} 字符"
+                self.logger.info(f"文档生成完成，长度: {doc_token_str}")
                 self.logger.debug("完整响应内容:")
-                for line in generated_doc.split("\n"):
-                    self.logger.debug(f"  {line}")
+                self.logger.debug(generated_doc)
                 return generated_doc
 
             return doc
