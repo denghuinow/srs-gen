@@ -13,3 +13,6 @@ wheels/
 .env
 output/
 .cursor
+
+# Large data files
+*.tar
