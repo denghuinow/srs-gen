@@ -98,6 +98,12 @@ def is_retryable_error(error_msg: str) -> bool:
     return False
 
 
+def is_task_completed(output_dir: Path) -> bool:
+    """检查任务是否已完成（检查关键输出文件是否存在）"""
+    srs_file = output_dir / "srs_document.md"
+    return srs_file.exists() and srs_file.is_file()
+
+
 def run_single_task(
     input_file: Path,
     baseline_file: Optional[Path],
@@ -108,11 +114,16 @@ def run_single_task(
     max_new_requirements_per_iteration: Optional[int],
     extra_args: List[str],
     max_retries: int = 3,
-    retry_delay: float = 5.0
+    retry_delay: float = 5.0,
+    skip_existing: bool = False
 ) -> Tuple[str, bool, str]:
     """执行单个任务，带重试机制"""
     task_name = input_file.stem
     output_dir = output_base_dir / task_name
+    
+    # 如果启用跳过已生成的任务，且任务已完成，则直接返回
+    if skip_existing and is_task_completed(output_dir):
+        return (task_name, True, "已跳过（任务已完成）")
     
     # 构建命令
     cmd = [
@@ -347,6 +358,12 @@ def main():
         help="重试前的等待时间（秒，默认：5.0）"
     )
     
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="跳过已生成的任务（如果输出目录中已存在srs_document.md文件，则跳过该任务）"
+    )
+    
     args = parser.parse_args()
     
     # 验证输入目录
@@ -426,6 +443,7 @@ def main():
     print(f"消融模式：{args.ablation_mode}")
     print(f"最大重试次数：{args.max_retries}")
     print(f"重试延迟：{args.retry_delay}秒")
+    print(f"跳过已生成：{'是' if args.skip_existing else '否'}")
     if baseline_dir:
         print(f"基准目录：{baseline_dir.absolute()}")
     if baseline_gend_dir:
@@ -469,7 +487,8 @@ def main():
                 args.max_new_requirements_per_iteration,
                 args.extra_args or [],
                 args.max_retries,
-                args.retry_delay
+                args.retry_delay,
+                args.skip_existing
             )
             # 添加输入文件信息到结果
             results.append((result[0], result[1], result[2], input_file))
@@ -494,7 +513,8 @@ def main():
                     args.max_new_requirements_per_iteration,
                     args.extra_args or [],
                     args.max_retries,
-                    args.retry_delay
+                    args.retry_delay,
+                    args.skip_existing
                 )
                 future_to_task[future] = (task_name, baseline_file, baseline_gend_file, input_file)
             
@@ -515,16 +535,21 @@ def main():
     total_time = time.time() - start_time
     success_count = sum(1 for _, success, _, _ in results if success)
     fail_count = len(results) - success_count
+    skipped_count = sum(1 for _, success, msg, _ in results if success and "已跳过" in msg)
+    executed_count = success_count - skipped_count
     
     print()
     print("=" * 60)
     print("执行统计")
     print("=" * 60)
     print(f"总任务数：{len(results)}")
-    print(f"成功：{success_count}")
+    print(f"成功执行：{executed_count}")
+    if skipped_count > 0:
+        print(f"跳过：{skipped_count}")
     print(f"失败：{fail_count}")
     print(f"总耗时：{total_time:.2f}秒")
-    print(f"平均耗时：{total_time/len(results):.2f}秒/任务")
+    if executed_count > 0:
+        print(f"平均耗时：{total_time/executed_count:.2f}秒/任务（仅计算实际执行的任务）")
     print()
     
     # 输出失败的任务
@@ -563,10 +588,17 @@ def main():
         
         f.write(f"最大重试次数：{args.max_retries}\n")
         f.write(f"重试延迟：{args.retry_delay}秒\n")
+        f.write(f"跳过已生成：{'是' if args.skip_existing else '否'}\n")
         f.write(f"总任务数：{len(results)}\n")
-        f.write(f"成功：{success_count}\n")
+        skipped_count = sum(1 for _, success, msg, _ in results if success and "已跳过" in msg)
+        executed_count = success_count - skipped_count
+        f.write(f"成功执行：{executed_count}\n")
+        if skipped_count > 0:
+            f.write(f"跳过：{skipped_count}\n")
         f.write(f"失败：{fail_count}\n")
         f.write(f"总耗时：{total_time:.2f}秒\n")
+        if executed_count > 0:
+            f.write(f"平均耗时：{total_time/executed_count:.2f}秒/任务（仅计算实际执行的任务）\n")
         
         # 尝试从成功任务的日志中提取实际迭代次数
         actual_iterations = []
@@ -607,13 +639,14 @@ def main():
     
     print(f"摘要已保存到：{summary_file}")
     
-    # 收集所有成功生成的SRS文档到统一文件夹
+    # 收集所有成功生成的SRS文档到统一文件夹（包括跳过的任务）
     if success_count > 0:
         srs_collection_dir = output_base_dir / "srs_collection"
         srs_collection_dir.mkdir(exist_ok=True)
         
         collected_count = 0
-        for task_name, success, _, input_file in results:
+        skipped_collected_count = 0
+        for task_name, success, msg, input_file in results:
             if success:
                 task_output_dir = output_base_dir / task_name
                 srs_file = task_output_dir / "srs_document.md"
@@ -624,9 +657,15 @@ def main():
                     dest_file = srs_collection_dir / f"{input_stem}.md"
                     shutil.copy2(srs_file, dest_file)
                     collected_count += 1
+                    # 如果是跳过的任务，也计入跳过的收集数量
+                    if "已跳过" in msg:
+                        skipped_collected_count += 1
         
         if collected_count > 0:
-            print(f"\n已收集 {collected_count} 个SRS文档到：{srs_collection_dir.absolute()}")
+            if skipped_collected_count > 0:
+                print(f"\n已收集 {collected_count} 个SRS文档到：{srs_collection_dir.absolute()}（其中 {skipped_collected_count} 个为已存在的任务）")
+            else:
+                print(f"\n已收集 {collected_count} 个SRS文档到：{srs_collection_dir.absolute()}")
         else:
             print("\n警告：未找到任何SRS文档文件")
     
