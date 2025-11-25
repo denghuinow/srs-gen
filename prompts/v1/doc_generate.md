@@ -7,6 +7,8 @@
 
 需求：{requirements_text}
 
+基准需求语义单元（参考）：{baseline_requirement_structure}
+
 风格配置：{style_profile}
 
 上下文示例：{context_examples}

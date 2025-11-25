@@ -348,12 +348,14 @@ class WorkflowOrchestrator:
         # 获取需求结构（用于no-explore-clarify模式）
         requirement_structure = state.get("requirement_structure", "")  # type: ignore
         ablation_mode = state.get("ablation_mode", "default")  # type: ignore
+        baseline_requirement_structure = state.get("baseline_requirement_structure", "")  # type: ignore
         
         srs_doc = agent.generate(
             filtered_requirements,
             raw_input=state["raw_input"],
             requirement_structure=requirement_structure,
-            ablation_mode=ablation_mode
+            ablation_mode=ablation_mode,
+            baseline_requirement_structure=baseline_requirement_structure
         )
         state["_srs_document"] = srs_doc  # type: ignore
         return state

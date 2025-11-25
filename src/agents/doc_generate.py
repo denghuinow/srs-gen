@@ -3,7 +3,6 @@
 from openai import OpenAI
 from ..config import Config
 from ..models.requirement import RequirementList
-from ..models.srs_template import SRSTemplate
 from ..utils.timer import TimerManager
 from ..utils.logger import get_logger
 from ..utils.streaming import stream_with_continuation
@@ -17,7 +16,6 @@ class DocGenerateAgent:
     def __init__(self, client: OpenAI, timer_manager: TimerManager, prompt_version: str = None):
         self.client = client
         self.timer = timer_manager.get_timer("DocGenerate")
-        self.template = SRSTemplate()
         self.logger = get_logger("DocGenerate")
         self.prompt_loader = PromptLoader(
             prompt_version=prompt_version or Config.PROMPT_VERSION
@@ -31,6 +29,7 @@ class DocGenerateAgent:
         stream: bool = None,
         requirement_structure: str = "",
         ablation_mode: str = "default",
+        baseline_requirement_structure: str = "",
     ) -> str:
         """生成SRS文档
         
@@ -41,6 +40,7 @@ class DocGenerateAgent:
             stream: 已废弃，始终使用流式响应
             requirement_structure: 需求结构（Markdown格式）
             ablation_mode: 消融模式
+            baseline_requirement_structure: 基准需求语义单元（通过ReqParse解析baseline_gend_srs得到）
         
         Returns:
             生成的SRS文档内容
@@ -48,9 +48,6 @@ class DocGenerateAgent:
         self.timer.start()
 
         try:
-            # 使用模板生成基础结构
-            doc = self.template.generate(requirements.requirements, project_name)
-
             # 构建详细的需求清单文本
             # no-explore-clarify模式：直接使用ReqParse的响应（requirement_structure）
             if ablation_mode == "no-explore-clarify" and requirement_structure:
@@ -74,7 +71,7 @@ class DocGenerateAgent:
                 raw_input=raw_input,
                 requirements_text=requirements_text,
                 style_profile=style_profile,
-                context_examples=context
+                context_examples=baseline_requirement_structure if baseline_requirement_structure else context,
             )
 
             messages = [
@@ -117,8 +114,9 @@ class DocGenerateAgent:
                 self.logger.debug("完整响应内容:")
                 self.logger.debug(generated_doc)
                 return generated_doc
-
-            return doc
+            else:
+                self.logger.error("LLM返回空内容，无法生成SRS文档")
+                raise ValueError("LLM返回空内容，无法生成SRS文档")
 
         finally:
             self.timer.stop()

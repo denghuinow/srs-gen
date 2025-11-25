@@ -132,8 +132,7 @@ srs-gen/
 │   │   ├── orchestrator.py # 工作流编排
 │   │   └── state.py       # 状态管理
 │   ├── models/            # 数据模型
-│   │   ├── requirement.py # 需求数据模型
-│   │   └── srs_template.py # SRS模板
+│   │   └── requirement.py # 需求数据模型
 │   └── utils/             # 工具函数
 │       ├── timer.py       # 耗时统计
 │       ├── score_history.py # 得分历史
