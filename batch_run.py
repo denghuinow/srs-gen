@@ -115,7 +115,8 @@ def run_single_task(
     extra_args: List[str],
     max_retries: int = 3,
     retry_delay: float = 5.0,
-    skip_existing: bool = False
+    skip_existing: bool = False,
+    enable_parallel_generation: bool = False
 ) -> Tuple[str, bool, str]:
     """执行单个任务，带重试机制"""
     task_name = input_file.stem
@@ -147,6 +148,10 @@ def run_single_task(
     
     if max_new_requirements_per_iteration:
         cmd.extend(["--max-new-requirements-per-iteration", str(max_new_requirements_per_iteration)])
+    
+    # 添加并行生成参数（如果启用）
+    if enable_parallel_generation:
+        cmd.append("--enable-parallel-generation")
     
     cmd.extend(extra_args)
     
@@ -364,6 +369,13 @@ def main():
         help="跳过已生成的任务（如果输出目录中已存在srs_document.md文件，则跳过该任务）"
     )
     
+    parser.add_argument(
+        "--enable-parallel-generation",
+        action="store_true",
+        default=False,
+        help="启用并行生成功能：在运行过程中自动生成no-explore-clarify、no-clarify和所有迭代版本的SRS文档"
+    )
+    
     args = parser.parse_args()
     
     # 验证输入目录
@@ -444,6 +456,7 @@ def main():
     print(f"最大重试次数：{args.max_retries}")
     print(f"重试延迟：{args.retry_delay}秒")
     print(f"跳过已生成：{'是' if args.skip_existing else '否'}")
+    print(f"并行生成功能：{'启用' if args.enable_parallel_generation else '禁用'}")
     if baseline_dir:
         print(f"基准目录：{baseline_dir.absolute()}")
     if baseline_gend_dir:
@@ -488,7 +501,8 @@ def main():
                 args.extra_args or [],
                 args.max_retries,
                 args.retry_delay,
-                args.skip_existing
+                args.skip_existing,
+                args.enable_parallel_generation
             )
             # 添加输入文件信息到结果
             results.append((result[0], result[1], result[2], input_file))
@@ -514,7 +528,8 @@ def main():
                     args.extra_args or [],
                     args.max_retries,
                     args.retry_delay,
-                    args.skip_existing
+                    args.skip_existing,
+                    args.enable_parallel_generation
                 )
                 future_to_task[future] = (task_name, baseline_file, baseline_gend_file, input_file)
             
@@ -589,6 +604,7 @@ def main():
         f.write(f"最大重试次数：{args.max_retries}\n")
         f.write(f"重试延迟：{args.retry_delay}秒\n")
         f.write(f"跳过已生成：{'是' if args.skip_existing else '否'}\n")
+        f.write(f"并行生成功能：{'启用' if args.enable_parallel_generation else '禁用'}\n")
         f.write(f"总任务数：{len(results)}\n")
         skipped_count = sum(1 for _, success, msg, _ in results if success and "已跳过" in msg)
         executed_count = success_count - skipped_count

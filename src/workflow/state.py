@@ -23,3 +23,7 @@ class WorkflowState(TypedDict, total=False):
     _srs_document: str  # 临时存储生成的SRS文档
     req_explore_messages: Optional[List[dict]]  # ReqExploreAgent 的对话历史
     clarification_results: Optional[List[ClarificationResult]]  # 评分结果，用于在 explore 和 clarify 之间传递
+    output_dir_base: Optional[str]  # 输出目录基础路径，用于并行生成（srs_collection目录）
+    task_name: Optional[str]  # 任务名称，用于并行生成时的文件命名
+    parallel_generation_threads: Optional[List]  # 并行生成线程列表，用于跟踪子线程
+    enable_parallel_generation: bool  # 是否启用并行生成功能

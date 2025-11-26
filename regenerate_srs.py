@@ -19,6 +19,7 @@ from src.models.requirement import Requirement, RequirementList
 from src.agents.doc_generate import DocGenerateAgent
 from src.utils.timer import TimerManager
 from src.utils.logger import Logger, get_logger
+from src.utils.prompt_loader import PromptLoader
 
 
 def find_latest_log(log_dir: Path) -> Optional[Path]:
@@ -275,6 +276,32 @@ def extract_raw_input(output_dir: Path) -> str:
     return "Not provided."
 
 
+def clean_log_format(text: str) -> str:
+    """
+    清理日志格式标记（时间戳和日志级别）
+    
+    日志格式示例：
+    2025-11-23 16:06:56 [DEBUG] [Streaming] 实际内容
+    
+    清理后只保留实际内容
+    """
+    if not text:
+        return text
+    
+    lines = text.split('\n')
+    cleaned_lines = []
+    
+    # 日志格式的正则表达式：时间戳 [级别] [Streaming] 内容
+    log_prefix_pattern = re.compile(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[[^\]]+\](?: \[[^\]]+\])?\s*')
+    
+    for line in lines:
+        # 移除日志格式前缀
+        cleaned_line = log_prefix_pattern.sub('', line)
+        cleaned_lines.append(cleaned_line)
+    
+    return '\n'.join(cleaned_lines).strip()
+
+
 def extract_first_explore_requirements(log_file: Path) -> Dict[str, str]:
     """
     从日志中提取第一次挖掘后的需求清单（用于no-clarify模式）
@@ -289,21 +316,25 @@ def extract_first_explore_requirements(log_file: Path) -> Dict[str, str]:
     
     # 查找第一次挖掘后的需求
     # 策略1：查找"需求挖掘 完成"之后，"完整响应内容:"之后的需求列表
-    # 格式：REQ-001: 需求文本
-    first_explore_pattern = r'需求挖掘 完成.*?完整响应内容:.*?\n((?:REQ-\d+:[^\n]+(?:\n(?!REQ-\d+:)[^\n]+)*\n?)+)'
+    # 格式：REQ-001: 需求文本（可能包含日志格式标记）
+    first_explore_pattern = r'需求挖掘 完成.*?完整响应内容:.*?\n(.*?)(?=\n\[迭代 1\]|挖掘完成|$)'
     first_explore_match = re.search(first_explore_pattern, content, re.DOTALL)
     
     if first_explore_match:
         req_list_text = first_explore_match.group(1)
-        req_text_pattern = r'REQ-(\d+):\s*([^\n]+(?:\n(?!REQ-\d+:)[^\n]+)*)'
+        # 清理日志格式标记
+        req_list_text = clean_log_format(req_list_text)
+        # 提取需求（支持多行需求文本，需求之间用---分隔）
+        req_text_pattern = r'REQ-(\d+):\s*([^\n]+(?:\n(?!REQ-\d+:|---)[^\n]+)*)'
         req_text_matches = re.findall(req_text_pattern, req_list_text)
         
         for req_num, req_text in req_text_matches:
             req_id = f"REQ-{int(req_num):03d}"
-            # 清理文本
-            lines = [line.strip() for line in req_text.split('\n') if line.strip()]
+            # 清理文本（移除多余的空行和分隔符）
+            lines = [line.strip() for line in req_text.split('\n') if line.strip() and not line.strip().startswith('---')]
             clean_text = ' '.join(lines)
-            requirements[req_id] = clean_text
+            if clean_text:  # 确保不是空文本
+                requirements[req_id] = clean_text
     else:
         # 策略2：查找"[迭代 1] 挖掘后需求ID集合"之后，到"[迭代 2]"之前的内容
         iter1_pattern = r'\[迭代 1\].*?挖掘后需求ID集合'
@@ -317,19 +348,23 @@ def extract_first_explore_requirements(log_file: Path) -> Dict[str, str]:
                 explore_section = explore_section[:next_iter_match.start()]
             
             # 从这部分提取需求（查找"完整响应内容:"之后的内容）
-            full_response_pattern = r'完整响应内容:.*?\n((?:REQ-\d+:[^\n]+(?:\n(?!REQ-\d+:)[^\n]+)*\n?)+)'
+            full_response_pattern = r'完整响应内容:.*?\n(.*?)(?=\n\[迭代|挖掘完成|$)'
             full_response_match = re.search(full_response_pattern, explore_section, re.DOTALL)
             if full_response_match:
                 req_list_text = full_response_match.group(1)
-                req_text_pattern = r'REQ-(\d+):\s*([^\n]+(?:\n(?!REQ-\d+:)[^\n]+)*)'
+                # 清理日志格式标记
+                req_list_text = clean_log_format(req_list_text)
+                # 提取需求
+                req_text_pattern = r'REQ-(\d+):\s*([^\n]+(?:\n(?!REQ-\d+:|---)[^\n]+)*)'
                 req_text_matches = re.findall(req_text_pattern, req_list_text)
                 
                 for req_num, req_text in req_text_matches:
                     req_id = f"REQ-{int(req_num):03d}"
-                    # 清理文本
-                    lines = [line.strip() for line in req_text.split('\n') if line.strip()]
+                    # 清理文本（移除多余的空行和分隔符）
+                    lines = [line.strip() for line in req_text.split('\n') if line.strip() and not line.strip().startswith('---')]
                     clean_text = ' '.join(lines)
-                    requirements[req_id] = clean_text
+                    if clean_text:  # 确保不是空文本
+                        requirements[req_id] = clean_text
     
     return requirements
 
@@ -338,6 +373,8 @@ def extract_requirement_structure(log_file: Path) -> str:
     """从日志中提取ReqParse的响应（用于no-explore-clarify模式）"""
     with open(log_file, 'r', encoding='utf-8') as f:
         content = f.read()
+    
+    extracted_text = ""
     
     # 策略1：查找"基准需求语义单元生成完成"之前的ReqParse响应
     # 这是baseline_requirement_structure，通过ReqParseAgent解析baseline_gend_srs得到
@@ -350,29 +387,36 @@ def extract_requirement_structure(log_file: Path) -> str:
         reqparse_pattern = r'ReqParse.*?完整响应内容:.*?\n(.*?)(?=\n\[|基准需求语义单元生成完成|$)'
         reqparse_match = re.search(reqparse_pattern, before_baseline, re.DOTALL)
         if reqparse_match:
-            return reqparse_match.group(1).strip()
+            extracted_text = reqparse_match.group(1).strip()
     
     # 策略2：查找"需求语义单元解析 完成"之后的响应（旧格式兼容）
-    pattern = r'需求语义单元解析 完成.*?\n(.*?)(?=需求语义单元生成完成|$)'
-    match = re.search(pattern, content, re.DOTALL)
-    
-    if match:
-        # 进一步提取实际内容（可能在DEBUG日志中）
-        text = match.group(1)
-        # 查找完整响应内容
-        debug_pattern = r'完整响应内容:.*?\n(.*?)(?=\n\[|$)'
-        debug_match = re.search(debug_pattern, text, re.DOTALL)
-        if debug_match:
-            return debug_match.group(1).strip()
-        return text.strip()
+    if not extracted_text:
+        pattern = r'需求语义单元解析 完成.*?\n(.*?)(?=需求语义单元生成完成|$)'
+        match = re.search(pattern, content, re.DOTALL)
+        
+        if match:
+            # 进一步提取实际内容（可能在DEBUG日志中）
+            text = match.group(1)
+            # 查找完整响应内容
+            debug_pattern = r'完整响应内容:.*?\n(.*?)(?=\n\[|$)'
+            debug_match = re.search(debug_pattern, text, re.DOTALL)
+            if debug_match:
+                extracted_text = debug_match.group(1).strip()
+            else:
+                extracted_text = text.strip()
     
     # 策略3：直接查找ReqParse的响应（最后的fallback）
-    reqparse_pattern = r'ReqParse.*?完整响应内容:.*?\n(.*?)(?=\n\[|$)'
-    reqparse_match = re.search(reqparse_pattern, content, re.DOTALL)
-    if reqparse_match:
-        return reqparse_match.group(1).strip()
+    if not extracted_text:
+        reqparse_pattern = r'ReqParse.*?完整响应内容:.*?\n(.*?)(?=\n\[|$)'
+        reqparse_match = re.search(reqparse_pattern, content, re.DOTALL)
+        if reqparse_match:
+            extracted_text = reqparse_match.group(1).strip()
     
-    return ""
+    # 清理日志格式标记
+    if extracted_text:
+        extracted_text = clean_log_format(extracted_text)
+    
+    return extracted_text
 
 
 def generate_srs_for_iteration(

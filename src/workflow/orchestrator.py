@@ -1,5 +1,8 @@
 """工作流编排 (FR-005, FR-006)"""
 import re
+import threading
+import copy
+from pathlib import Path
 from typing import Literal, Optional, List
 from langgraph.graph import StateGraph, END
 from openai import OpenAI
@@ -29,6 +32,10 @@ class WorkflowOrchestrator:
         
         # 初始化智能体（计时器将在状态中共享）
         self.timer_manager = None  # 将在run中初始化
+        
+        # 并行生成线程管理
+        self.parallel_threads: List[threading.Thread] = []
+        self.parallel_thread_results: dict = {}  # 存储并行生成结果
     
     def _parse_node(self, state: WorkflowState) -> WorkflowState:
         """解析节点"""
@@ -52,6 +59,18 @@ class WorkflowOrchestrator:
             self.logger.info(f"基准需求语义单元生成完成，长度: {baseline_token_str}")
         else:
             state["baseline_requirement_structure"] = ""  # type: ignore
+        
+        # 如果启用并行生成，在parse后生成no-explore-clarify版本
+        if state.get("enable_parallel_generation", False):
+            output_dir_base = state.get("output_dir_base")
+            if output_dir_base:
+                state_snapshot = self._create_state_snapshot(state)
+                self._generate_parallel_srs(
+                    state_snapshot=state_snapshot,
+                    version_name="no-explore-clarify",
+                    output_dir_base=output_dir_base,
+                    ablation_mode="no-explore-clarify"
+                )
         
         return state
     
@@ -113,6 +132,18 @@ class WorkflowOrchestrator:
             self.logger.info(f"[迭代 {state['iteration_count']}] 挖掘阶段新增需求: {sorted(new_req_ids)}")
         else:
             self.logger.debug(f"[迭代 {state['iteration_count']}] 挖掘阶段无新增需求")
+        
+        # 如果启用并行生成，在第一次explore后生成no-clarify版本
+        if state.get("enable_parallel_generation", False) and state["iteration_count"] == 1:
+            output_dir_base = state.get("output_dir_base")
+            if output_dir_base:
+                state_snapshot = self._create_state_snapshot(state)
+                self._generate_parallel_srs(
+                    state_snapshot=state_snapshot,
+                    version_name="no-clarify",
+                    output_dir_base=output_dir_base,
+                    ablation_mode="no-clarify"
+                )
         
         return state
 
@@ -283,6 +314,19 @@ class WorkflowOrchestrator:
         if negative_count > 0:
             self.logger.info(f"[迭代 {state['iteration_count']}] 保留负分需求数量: {negative_count}（将在下一轮迭代中改进）")
         
+        # 如果启用并行生成，在每次clarify后生成iter{N}版本
+        if state.get("enable_parallel_generation", False):
+            output_dir_base = state.get("output_dir_base")
+            if output_dir_base:
+                iteration = state["iteration_count"]
+                state_snapshot = self._create_state_snapshot(state)
+                self._generate_parallel_srs(
+                    state_snapshot=state_snapshot,
+                    version_name=f"iter{iteration}",
+                    output_dir_base=output_dir_base,
+                    iteration=iteration
+                )
+        
         return state
     
     def _check_convergence(self, state: WorkflowState) -> Literal["continue", "generate"]:
@@ -321,6 +365,134 @@ class WorkflowOrchestrator:
         negative_info = "存在负分条目" if has_negative else "无负分条目"
         self.logger.info(f"[迭代 {iteration}] 收敛判断: {negative_info}，继续迭代 -> 迭代 {next_iteration}（强制迭代到最大次数 {max_iterations}）")
         return "continue"
+    
+    def _generate_parallel_srs(
+        self,
+        state_snapshot: dict,
+        version_name: str,
+        output_dir_base: str,
+        ablation_mode: Optional[str] = None,
+        iteration: Optional[int] = None
+    ) -> None:
+        """在子线程中生成特定版本的SRS
+        
+        Args:
+            state_snapshot: 状态快照（包含requirements等关键数据）
+            version_name: 版本名称（如 "no-explore-clarify", "no-clarify", "iter1"）
+            output_dir_base: 输出目录基础路径
+            ablation_mode: 消融模式（用于no-explore-clarify和no-clarify）
+            iteration: 迭代次数（用于iter版本）
+        """
+        def generate_in_thread():
+            try:
+                thread_logger = get_logger(f"ParallelGen-{version_name}")
+                thread_logger.info(f"开始并行生成 {version_name} 版本的SRS文档...")
+                
+                # 创建独立的DocGenerateAgent（使用新的OpenAI客户端）
+                client = OpenAI(**Config.get_openai_client_kwargs())
+                timer_manager = state_snapshot.get("timer_manager")
+                if timer_manager is None:
+                    from ..utils.timer import TimerManager
+                    timer_manager = TimerManager()
+                
+                agent = DocGenerateAgent(client, timer_manager, prompt_version=self.prompt_version)
+                
+                # 根据版本类型确定需求列表和参数
+                raw_input = state_snapshot.get("raw_input", "")
+                requirement_structure = state_snapshot.get("requirement_structure", "")
+                baseline_requirement_structure = state_snapshot.get("baseline_requirement_structure", "")
+                
+                # 确定ablation_mode
+                if ablation_mode:
+                    final_ablation_mode = ablation_mode
+                elif iteration:
+                    final_ablation_mode = "default"
+                else:
+                    final_ablation_mode = "default"
+                
+                # 根据版本类型处理需求列表
+                if ablation_mode == "no-explore-clarify":
+                    # no-explore-clarify模式：直接使用requirement_structure，不需要requirements
+                    requirements = RequirementList()
+                elif ablation_mode == "no-clarify":
+                    # no-clarify模式：使用当前requirements，但所有需求score设为0
+                    requirements = copy.deepcopy(state_snapshot.get("requirements", RequirementList()))
+                    for req in requirements.requirements:
+                        if req.score is None:
+                            req.score = 0
+                elif iteration is not None:
+                    # iter版本：筛选历史得分>=1的需求
+                    requirements = copy.deepcopy(state_snapshot.get("requirements", RequirementList()))
+                    score_history = state_snapshot.get("score_history")
+                    if score_history:
+                        filtered_requirements = RequirementList()
+                        for req in requirements.requirements:
+                            best_score = score_history.get_best_score(req.id)
+                            if best_score is not None and best_score >= 1:
+                                filtered_requirements.requirements.append(req)
+                        requirements = filtered_requirements
+                else:
+                    # 默认：使用所有需求
+                    requirements = copy.deepcopy(state_snapshot.get("requirements", RequirementList()))
+                
+                # 生成SRS文档
+                srs_document = agent.generate(
+                    requirements,
+                    raw_input=raw_input,
+                    requirement_structure=requirement_structure,
+                    ablation_mode=final_ablation_mode,
+                    baseline_requirement_structure=baseline_requirement_structure
+                )
+                
+                # 保存到srs_collection目录下的版本子目录
+                output_dir = Path(output_dir_base) / f"srs_document_{version_name}"
+                output_dir.mkdir(parents=True, exist_ok=True)
+                
+                # 使用任务名作为文件名
+                task_name = state_snapshot.get("task_name", "srs_document")
+                doc_name = f"{task_name}.md"
+                srs_path = output_dir / doc_name
+                
+                with open(srs_path, "w", encoding="utf-8") as f:
+                    f.write(srs_document)
+                
+                thread_logger.info(f"✓ {version_name} 版本SRS文档已保存到：{srs_path}")
+                self.parallel_thread_results[version_name] = {"success": True, "path": str(srs_path)}
+                
+            except Exception as e:
+                thread_logger = get_logger(f"ParallelGen-{version_name}")
+                thread_logger.error(f"✗ {version_name} 版本生成失败：{e}", exc_info=True)
+                self.parallel_thread_results[version_name] = {"success": False, "error": str(e)}
+        
+        # 启动子线程
+        thread = threading.Thread(target=generate_in_thread, daemon=True)
+        thread.start()
+        self.parallel_threads.append(thread)
+        self.logger.info(f"已启动并行生成线程：{version_name}")
+    
+    def _create_state_snapshot(self, state: WorkflowState) -> dict:
+        """创建状态快照（深拷贝关键数据）"""
+        from ..utils.score_history import ScoreHistory
+        
+        # 深拷贝score_history
+        score_history = state.get("score_history")
+        if score_history:
+            # ScoreHistory可能没有深拷贝方法，需要手动复制
+            copied_score_history = ScoreHistory()
+            if hasattr(score_history, 'history'):
+                copied_score_history.history = copy.deepcopy(score_history.history)
+        else:
+            copied_score_history = ScoreHistory()
+        
+        return {
+            "requirements": copy.deepcopy(state.get("requirements", RequirementList())),
+            "raw_input": state.get("raw_input", ""),
+            "requirement_structure": state.get("requirement_structure", ""),
+            "baseline_requirement_structure": state.get("baseline_requirement_structure", ""),
+            "score_history": copied_score_history,
+            "timer_manager": state.get("timer_manager"),  # 共享timer_manager
+            "task_name": state.get("task_name"),  # 任务名
+        }
     
     def _generate_node(self, state: WorkflowState) -> WorkflowState:
         """生成节点"""
@@ -395,7 +567,10 @@ class WorkflowOrchestrator:
         baseline_gend_srs: str = "",
         ablation_mode: AblationMode = "default",
         max_iterations: Optional[int] = None,
-        max_new_requirements_per_iteration: Optional[int] = None
+        max_new_requirements_per_iteration: Optional[int] = None,
+        output_dir_base: Optional[str] = None,
+        task_name: Optional[str] = None,
+        enable_parallel_generation: bool = False
     ) -> dict:
         """运行工作流"""
         from ..utils.timer import TimerManager
@@ -418,7 +593,11 @@ class WorkflowOrchestrator:
             "max_iterations": max_iterations if max_iterations is not None else Config.MAX_ITERATIONS,  # type: ignore
             "max_new_requirements_per_iteration": max_new_requirements_per_iteration,  # type: ignore
             "req_explore_messages": None,  # type: ignore
-            "clarification_results": None  # type: ignore
+            "clarification_results": None,  # type: ignore
+            "output_dir_base": output_dir_base,  # type: ignore
+            "task_name": task_name,  # type: ignore
+            "parallel_generation_threads": None,  # type: ignore
+            "enable_parallel_generation": enable_parallel_generation  # type: ignore
         }
         
         # 开始计时
@@ -453,10 +632,27 @@ class WorkflowOrchestrator:
             ablation_mode
         )
         
+        # 等待所有并行生成线程完成
+        if enable_parallel_generation:
+            self.logger.info("等待所有并行生成线程完成...")
+            for thread in self.parallel_threads:
+                thread.join(timeout=300)  # 最多等待5分钟
+                if thread.is_alive():
+                    self.logger.warning(f"并行生成线程 {thread.name} 超时")
+            
+            # 报告并行生成结果
+            self.logger.info("\n=== 并行生成结果 ===")
+            for version_name, result in self.parallel_thread_results.items():
+                if result.get("success"):
+                    self.logger.info(f"✓ {version_name}: {result.get('path')}")
+                else:
+                    self.logger.error(f"✗ {version_name}: {result.get('error')}")
+        
         return {
             "srs_document": final_state.get("_srs_document", ""),
             "requirements": final_state["requirements"],
             "comparison_report": comparison_report,
             "total_time": final_state["timer_manager"].get_total_time(),
-            "timer_summary": final_state["timer_manager"].get_summary()
+            "timer_summary": final_state["timer_manager"].get_summary(),
+            "parallel_generation_results": self.parallel_thread_results if enable_parallel_generation else {}
         }

@@ -84,6 +84,13 @@ def main():
         help="提示词版本（默认：从环境变量PROMPT_VERSION或配置中读取，默认值为v1）"
     )
     
+    parser.add_argument(
+        "--enable-parallel-generation",
+        action="store_true",
+        default=False,
+        help="启用并行生成功能：在运行过程中自动生成no-explore-clarify、no-clarify和所有迭代版本的SRS文档"
+    )
+    
     args = parser.parse_args()
     
     # 加载输入
@@ -129,69 +136,93 @@ def main():
     logger.info(f"日志文件：{log_file_path}")
     if args.prompt_version:
         logger.info(f"提示词版本：{args.prompt_version}")
+    if args.enable_parallel_generation:
+        logger.info("并行生成功能已启用：将自动生成所有版本（no-explore-clarify、no-clarify、iter1-N）")
+    
     orchestrator = WorkflowOrchestrator(
         ablation_mode=args.ablation_mode,  # type: ignore
         prompt_version=args.prompt_version
     )
     
     try:
+        # 主输出目录就是output_dir（不创建子目录）
+        main_output_dir = output_dir
+        
+        # 如果启用并行生成，需要确定srs_collection目录和任务名
+        srs_collection_dir = None
+        task_name = None
+        if args.enable_parallel_generation:
+            # srs_collection目录在output_dir的父目录下
+            srs_collection_dir = output_dir.parent / "srs_collection"
+            srs_collection_dir.mkdir(parents=True, exist_ok=True)
+            # 从输入文件路径提取任务名
+            input_path = Path(args.input)
+            if input_path.exists():
+                task_name = input_path.stem
+            else:
+                # 如果输入是文本，使用output_dir的名称作为任务名
+                task_name = output_dir.name
+        
         result = orchestrator.run(
             raw_input=raw_input,
             baseline_srs=baseline_srs,
             baseline_gend_srs=baseline_gend_srs,
             ablation_mode=args.ablation_mode,  # type: ignore
             max_iterations=args.max_iterations,
-            max_new_requirements_per_iteration=args.max_new_requirements_per_iteration
+            max_new_requirements_per_iteration=args.max_new_requirements_per_iteration,
+            output_dir_base=str(srs_collection_dir) if args.enable_parallel_generation else None,
+            task_name=task_name if args.enable_parallel_generation else None,
+            enable_parallel_generation=args.enable_parallel_generation
         )
         
-        # 保存SRS文档
-        srs_path = output_dir / "srs_document.md"
+        # 保存SRS文档（主流程的最终版本）
+        srs_path = main_output_dir / "srs_document.md"
         with open(srs_path, "w", encoding="utf-8") as f:
             f.write(result["srs_document"])
-        logger.info(f"SRS文档已保存到：{srs_path}")
+        logger.info(f"主流程SRS文档已保存到：{srs_path}")
         
-        # 保存对比报告
-        report_path = output_dir / "comparison_report.md"
+        # 保存对比报告（保存到主输出目录）
+        report_path = main_output_dir / "comparison_report.md"
         with open(report_path, "w", encoding="utf-8") as f:
             f.write(result["comparison_report"])
         logger.info(f"对比报告已保存到：{report_path}")
         
-        # 复制输入文档到输出目录
+        # 复制输入文档到主输出目录
         input_path = Path(args.input)
         if input_path.exists():
             # 如果是文件，使用规范命名：input_<原文件名>
             input_suffix = input_path.suffix
             input_stem = input_path.stem
-            input_dest = output_dir / f"input_{input_stem}{input_suffix}"
+            input_dest = main_output_dir / f"input_{input_stem}{input_suffix}"
             shutil.copy2(input_path, input_dest)
             logger.info(f"输入文档已复制到：{input_dest}")
         else:
             # 如果是文本内容，保存为文件
-            input_dest = output_dir / "input.txt"
+            input_dest = main_output_dir / "input.txt"
             with open(input_dest, "w", encoding="utf-8") as f:
                 f.write(raw_input)
             logger.info(f"输入内容已保存到：{input_dest}")
         
-        # 复制基准文档到输出目录
+        # 复制基准文档到主输出目录
         if args.baseline_srs:
             baseline_path = Path(args.baseline_srs)
             if baseline_path.exists():
                 # 使用规范命名：baseline_srs_<原文件名> 或 baseline_srs.md
                 baseline_suffix = baseline_path.suffix
                 baseline_stem = baseline_path.stem
-                baseline_dest = output_dir / f"baseline_srs_{baseline_stem}{baseline_suffix}"
+                baseline_dest = main_output_dir / f"baseline_srs_{baseline_stem}{baseline_suffix}"
                 shutil.copy2(baseline_path, baseline_dest)
                 logger.info(f"基准文档已复制到：{baseline_dest}")
             else:
                 logger.warning(f"基准文档文件不存在：{baseline_path}")
         
-        # 复制基准生成的SRS文档到输出目录
+        # 复制基准生成的SRS文档到主输出目录
         if args.baseline_gend_srs:
             baseline_gend_path = Path(args.baseline_gend_srs)
             if baseline_gend_path.exists():
                 baseline_gend_suffix = baseline_gend_path.suffix
                 baseline_gend_stem = baseline_gend_path.stem
-                baseline_gend_dest = output_dir / f"baseline_gend_srs_{baseline_gend_stem}{baseline_gend_suffix}"
+                baseline_gend_dest = main_output_dir / f"baseline_gend_srs_{baseline_gend_stem}{baseline_gend_suffix}"
                 shutil.copy2(baseline_gend_path, baseline_gend_dest)
                 logger.info(f"基准生成的SRS文档已复制到：{baseline_gend_dest}")
             else:
@@ -205,8 +236,21 @@ def main():
         for agent, time_cost in result["timer_summary"].items():
             logger.info(f"  {agent}: {time_cost:.2f}秒")
         
+        # 输出并行生成结果
+        if args.enable_parallel_generation and result.get("parallel_generation_results"):
+            logger.info("\n=== 并行生成结果 ===")
+            for version_name, gen_result in result["parallel_generation_results"].items():
+                if gen_result.get("success"):
+                    logger.info(f"✓ {version_name}: {gen_result.get('path')}")
+                else:
+                    logger.error(f"✗ {version_name}: {gen_result.get('error')}")
+        
         logger.info("\n执行完成！")
-        print(f"\n执行完成！所有文件已保存到：{output_dir.absolute()}")
+        if args.enable_parallel_generation:
+            print(f"\n执行完成！所有文件已保存到：{output_dir.absolute()}")
+            print(f"主流程文档：{main_output_dir.absolute()}")
+        else:
+            print(f"\n执行完成！所有文件已保存到：{output_dir.absolute()}")
         
     except Exception as e:
         logger.error(f"执行失败：{e}", exc_info=True)
