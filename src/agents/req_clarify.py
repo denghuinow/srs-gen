@@ -98,6 +98,11 @@ class ReqClarifyAgent:
             if max_tokens is not None:
                 base_api_params["max_tokens"] = max_tokens
             
+            # 使用 extra_body 传递额外参数（用于兼容支持这些参数的其他API）
+            base_api_params["extra_body"] = {
+                "repetition_penalty": 1.2,
+            }
+            
             # 记录API调用参数
             self.logger.debug(f"API调用基础参数: {base_api_params}")
             
@@ -132,7 +137,7 @@ class ReqClarifyAgent:
                     # 如果没有找到代码块，尝试提取第一个 ``` 到最后一个 ``` 之间的内容
                     parts = content.split("```")
                     if len(parts) >= 3:
-                        tsv_content = parts[1] if len(parts[1].strip()) > 0 else parts[2]
+                        tsv_content = (parts[1] or "") if (parts[1] and len(parts[1].strip()) > 0) else (parts[2] if len(parts) > 2 and parts[2] else "")
             
             # 清理TSV内容：移除前导空行，确保第一行是表头
             lines = tsv_content.split('\n')
@@ -162,15 +167,15 @@ class ReqClarifyAgent:
                 
                 for row in reader:
                     # 支持英文和中文表头
-                    req_id = row.get("Requirement ID", row.get("需求ID", "")).strip()
+                    req_id = (row.get("Requirement ID") or row.get("需求ID") or "").strip()
                     if not req_id or not req_id.startswith("REQ-"):
                         continue
                     
-                    # 获取理由（支持新格式 Reason 和旧格式 Note，以及中文格式：理由、说明）
-                    reason = row.get("Reason", row.get("Note", row.get("理由", row.get("说明", "")))).strip()[:30]
+                    # 获取理由（新格式：Reason）
+                    reason = (row.get("Reason") or row.get("理由") or "").strip()[:30]
                     
                     # 解析分数（支持新格式和旧格式）
-                    score_str = row.get("Score", row.get("评分", "")).strip()
+                    score_str = (row.get("Score") or row.get("评分") or "").strip()
                     score_val = None
                     if score_str:
                         # 移除可能的 + 号并转换为整数
@@ -205,64 +210,7 @@ class ReqClarifyAgent:
                 self.logger.error(f"解析 TSV 格式时出错: {e}")
                 self.logger.debug("TSV 内容:")
                 self.logger.debug(tsv_content)
-                # 如果 TSV 解析失败，尝试回退到旧的管道符格式（向后兼容）
-                self.logger.warning("TSV 解析失败，尝试回退到旧格式解析...")
-                for line in content.split("\n"):
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    
-                    if "|" not in line:
-                        continue
-                    
-                    parts = [part.strip() for part in line.split("|")]
-                    req_part = parts[0]
-                    if ":" in req_part:
-                        req_part = req_part.split(":", 1)[0].strip()
-                    req_id = req_part.replace("**", "").replace("*", "").strip()
-                    if not req_id.startswith("REQ-"):
-                        continue
-                    
-                    score_val = None
-                    reason_parts = []
-                    
-                    for part in parts[1:]:
-                        normalized = part.replace("：", ":").strip()
-                        lower = normalized.lower()
-                        # 支持英文格式 "Score:" 和中文格式 "评分"
-                        if lower.startswith("score") or lower.startswith("评分"):
-                            match = re.search(r"[-+]?\d+", normalized)
-                            if match:
-                                score_val = int(match.group())
-                        # 支持英文格式 "Note:" 和中文格式 "说明"
-                        elif lower.startswith("note") or lower.startswith("说明"):
-                            reason_text = normalized.split(":", 1)[-1].strip()
-                            reason_parts = [reason_text[:30]]
-                            break
-                        elif lower.startswith("理由") or lower.startswith("证据"):
-                            reason_text = normalized.split(":", 1)[-1].strip()
-                            if reason_text:
-                                reason_parts.append(reason_text)
-                    
-                    reason = " ".join(reason_parts)[:30] if reason_parts else ""
-                    
-                    if score_val is None:
-                        score_val = 0
-                    
-                    if score_val > 2:
-                        score_val = 2
-                    elif score_val < -2:
-                        score_val = -2
-                    
-                    # 直接使用字典键更新，不需要get方法（因为已经初始化了所有键）
-                    score_distribution[score_val] = score_distribution[score_val] + 1
-                    
-                    results.append(ClarificationResult(
-                        req_id=req_id,
-                        score=score_val,
-                        reason=reason,
-                        evidence=None
-                    ))
+                raise
             
             # 记录评分结果统计（使用统一的评分定义）
             self.logger.info("评分结果统计:")

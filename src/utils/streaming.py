@@ -126,9 +126,15 @@ def request_stream_completion(client: OpenAI, api_params: dict) -> Tuple[str, st
             # 提取详细的错误信息
             error_message = str(e)
             error_body = getattr(e, 'body', None)
+            is_max_tokens_error = False
+            parsed_input_tokens = None
+            parsed_max_context = None
+            parsed_requested_max_tokens = None
+            
             if error_body:
                 try:
                     import json
+                    import re
                     if isinstance(error_body, str):
                         error_dict = json.loads(error_body)
                     else:
@@ -137,12 +143,42 @@ def request_stream_completion(client: OpenAI, api_params: dict) -> Tuple[str, st
                         error_detail = error_dict['error']
                         if isinstance(error_detail, dict):
                             error_message = f"{error_message} - {json.dumps(error_detail, ensure_ascii=False)}"
+                            # 检查是否是max_tokens相关的错误
+                            error_msg = str(error_detail.get('message', ''))
+                            error_msg_lower = error_msg.lower()
+                            if 'max_tokens' in error_msg_lower or 'max_completion_tokens' in error_msg_lower:
+                                is_max_tokens_error = True
+                                
+                                # 从错误信息中解析实际值
+                                # 示例: "'max_tokens' or 'max_completion_tokens' is too large: 4387. This model's maximum context length is 131072 tokens and your request has 129968 input tokens"
+                                # 提取请求的max_tokens
+                                max_tokens_match = re.search(r'(?:max_tokens|max_completion_tokens).*?is too large:\s*(\d+)', error_msg, re.IGNORECASE)
+                                if max_tokens_match:
+                                    parsed_requested_max_tokens = int(max_tokens_match.group(1))
+                                
+                                # 提取最大上下文长度
+                                context_match = re.search(r'maximum context length is (\d+)', error_msg, re.IGNORECASE)
+                                if context_match:
+                                    parsed_max_context = int(context_match.group(1))
+                                
+                                # 提取实际输入token
+                                input_match = re.search(r'your request has (\d+) input tokens', error_msg, re.IGNORECASE)
+                                if input_match:
+                                    parsed_input_tokens = int(input_match.group(1))
+                                
+                                if parsed_input_tokens and parsed_max_context:
+                                    logger.info(
+                                        f"从API错误信息中解析出：输入token={parsed_input_tokens}, "
+                                        f"最大上下文={parsed_max_context}, "
+                                        f"请求的max_tokens={parsed_requested_max_tokens}"
+                                    )
                         else:
                             error_message = f"{error_message} - {error_detail}"
-                except Exception:
+                except Exception as parse_error:
+                    logger.debug(f"解析错误信息失败: {parse_error}")
                     pass  # 如果解析失败，使用原始错误信息
             
-            # 5xx错误可以重试，4xx错误（客户端错误）不重试
+            # 5xx错误可以重试
             if status_code and 500 <= status_code < 600:
                 logger.warning(f"API调用失败（服务器错误 {status_code}）: {error_message}")
                 if attempt < max_retries:
@@ -150,8 +186,49 @@ def request_stream_completion(client: OpenAI, api_params: dict) -> Tuple[str, st
                 else:
                     logger.error(f"所有 {max_retries + 1} 次尝试均失败")
                     raise Exception(f"API调用失败（服务器错误 {status_code}）: {error_message}")
+            # max_tokens相关的400错误可以自动修复并重试
+            elif is_max_tokens_error and status_code == 400:
+                error_prefix = f"Error code: {status_code}" if status_code else "客户端错误"
+                logger.warning(f"API调用失败（max_tokens错误，将自动修复）: {error_message}")
+                
+                # 如果成功解析出值，使用解析出的值重新计算max_tokens
+                if parsed_input_tokens is not None and parsed_max_context is not None:
+                    # 计算可用的输出token（预留安全边距）
+                    available_tokens = parsed_max_context - parsed_input_tokens
+                    safety_margin = 200  # 安全边距
+                    safe_max_tokens = max(100, available_tokens - safety_margin)
+                    
+                    if safe_max_tokens > 0:
+                        logger.info(
+                            f"使用API返回的实际值重新计算max_tokens: "
+                            f"输入={parsed_input_tokens}, 最大上下文={parsed_max_context}, "
+                            f"可用={available_tokens}, 安全max_tokens={safe_max_tokens}"
+                        )
+                        # 更新api_params中的max_tokens并重试
+                        api_params["max_tokens"] = safe_max_tokens
+                        # 继续重试循环
+                        if attempt < max_retries:
+                            continue
+                        else:
+                            # 如果已经是最后一次尝试，抛出异常让外层处理
+                            raise Exception(
+                                f"API调用失败（max_tokens错误，已使用API返回的实际值修复，可自动修复）: "
+                                f"{error_prefix} - 输入token={parsed_input_tokens}, "
+                                f"最大上下文={parsed_max_context}, 修复后max_tokens={safe_max_tokens}"
+                            )
+                    else:
+                        logger.error(
+                            f"无法修复：输入token ({parsed_input_tokens}) 已超过或接近最大上下文长度 ({parsed_max_context})"
+                        )
+                        raise Exception(
+                            f"输入token数量 ({parsed_input_tokens}) 已超过或接近最大上下文长度 ({parsed_max_context})，"
+                            f"无法生成输出。请减少输入内容或增加最大上下文长度。"
+                        )
+                else:
+                    # 如果无法解析，标记为可修复的错误，让外层处理
+                    raise Exception(f"API调用失败（max_tokens错误，可自动修复）: {error_prefix} - {error_message}")
             else:
-                # 客户端错误（4xx）不重试，直接抛出
+                # 其他客户端错误（4xx）不重试，直接抛出
                 error_prefix = f"Error code: {status_code}" if status_code else "客户端错误"
                 logger.error(f"API调用失败（{error_prefix}）: {error_message}")
                 raise Exception(f"API调用失败: {error_prefix} - {error_message}")
@@ -262,8 +339,98 @@ def stream_with_continuation(
         try:
             content, finish_reason = request_stream_completion(client, api_params)
         except Exception as e:
-            logger.error(f"{task_name} 流式生成过程中出错: {e}")
-            raise
+            error_str = str(e)
+            # 检查是否是max_tokens相关的错误，如果是，尝试自动修复
+            if "max_tokens错误，可自动修复" in error_str or ("max_tokens" in error_str.lower() and "400" in error_str):
+                logger.warning(f"{task_name} 检测到max_tokens错误，尝试自动修复...")
+                
+                # 尝试从错误信息中提取API返回的实际值
+                import re
+                parsed_input_tokens = None
+                parsed_max_context = None
+                parsed_requested_max_tokens = None
+                
+                # 从错误信息中解析
+                # 示例: "输入token=129968, 最大上下文=131072, 修复后max_tokens=1104"
+                input_match = re.search(r'输入token[=:](\d+)', error_str)
+                if input_match:
+                    parsed_input_tokens = int(input_match.group(1))
+                
+                context_match = re.search(r'最大上下文[=:](\d+)', error_str)
+                if context_match:
+                    parsed_max_context = int(context_match.group(1))
+                
+                max_tokens_match = re.search(r'修复后max_tokens[=:](\d+)', error_str)
+                if max_tokens_match:
+                    parsed_requested_max_tokens = int(max_tokens_match.group(1))
+                
+                # 如果从错误信息中解析出了值，直接使用
+                if parsed_input_tokens is not None and parsed_max_context is not None:
+                    available_tokens = parsed_max_context - parsed_input_tokens
+                    safety_margin = 200
+                    safe_max_tokens = max(100, available_tokens - safety_margin)
+                    
+                    if safe_max_tokens > 0:
+                        logger.info(
+                            f"{task_name} 使用API返回的实际值自动修复max_tokens - "
+                            f"输入: {parsed_input_tokens}, 最大上下文: {parsed_max_context}, "
+                            f"可用: {available_tokens}, 安全max_tokens: {safe_max_tokens}"
+                        )
+                        api_params["max_tokens"] = safe_max_tokens
+                        try:
+                            content, finish_reason = request_stream_completion(client, api_params)
+                            logger.info(f"{task_name} 自动修复成功，继续生成...")
+                        except Exception as retry_e:
+                            logger.error(f"{task_name} 自动修复后仍然失败: {retry_e}")
+                            raise
+                    else:
+                        logger.error(
+                            f"{task_name} 无法自动修复：输入token ({parsed_input_tokens}) "
+                            f"已超过最大上下文长度 ({parsed_max_context})"
+                        )
+                        raise Exception(
+                            f"输入token数量 ({parsed_input_tokens}) 已超过最大上下文长度 ({parsed_max_context})，"
+                            f"无法生成输出。请减少输入内容或增加最大上下文长度。"
+                        )
+                # 如果没有解析出值，使用本地计算
+                elif max_context_length is not None:
+                    input_tokens = count_tokens(messages)
+                    if input_tokens is not None:
+                        # 使用更保守的计算：可用token减去更大的安全边距
+                        available_tokens = max_context_length - input_tokens
+                        safety_margin = 500  # 增加安全边距
+                        safe_max_tokens = max(100, available_tokens - safety_margin)  # 至少保留100 tokens
+                        
+                        if safe_max_tokens > 0:
+                            logger.info(
+                                f"{task_name} 自动修复max_tokens - 输入: {input_tokens}, "
+                                f"可用: {available_tokens}, 安全max_tokens: {safe_max_tokens}"
+                            )
+                            # 更新api_params并重试一次
+                            api_params["max_tokens"] = safe_max_tokens
+                            try:
+                                content, finish_reason = request_stream_completion(client, api_params)
+                                logger.info(f"{task_name} 自动修复成功，继续生成...")
+                            except Exception as retry_e:
+                                logger.error(f"{task_name} 自动修复后仍然失败: {retry_e}")
+                                raise
+                        else:
+                            logger.error(
+                                f"{task_name} 无法自动修复：输入token ({input_tokens}) 已超过最大上下文长度 ({max_context_length})"
+                            )
+                            raise Exception(
+                                f"输入token数量 ({input_tokens}) 已超过最大上下文长度 ({max_context_length})，"
+                                f"无法生成输出。请减少输入内容或增加最大上下文长度。"
+                            )
+                    else:
+                        logger.error(f"{task_name} 无法计算输入token，无法自动修复")
+                        raise
+                else:
+                    logger.error(f"{task_name} 未配置MAX_CONTEXT_LENGTH，无法自动修复")
+                    raise
+            else:
+                logger.error(f"{task_name} 流式生成过程中出错: {e}")
+                raise
         
         if content:
             content_parts.append(content)

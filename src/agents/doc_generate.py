@@ -98,25 +98,52 @@ class DocGenerateAgent:
             max_tokens = Config.get_max_tokens()
             if max_tokens is not None:
                 base_api_params["max_tokens"] = max_tokens
+            
+            # 使用 extra_body 传递额外参数（用于兼容支持这些参数的其他API）
+            base_api_params["extra_body"] = {
+                "repetition_penalty": 1.2,
+            }
 
             # 使用统一的流式响应和续接处理
             # 接续生成不需要提示词，使用对话前缀续写方式
-            generated_doc = stream_with_continuation(
-                client=self.client,
-                base_api_params=base_api_params,
-                messages=messages,
-                task_name="文档生成"
-            )
-            if generated_doc:
-                doc_tokens = count_text_tokens(generated_doc)
-                doc_token_str = f"{doc_tokens} tokens" if doc_tokens is not None else f"{len(generated_doc)} 字符"
-                self.logger.info(f"文档生成完成，长度: {doc_token_str}")
-                self.logger.debug("完整响应内容:")
-                self.logger.debug(generated_doc)
-                return generated_doc
-            else:
-                self.logger.error("LLM返回空内容，无法生成SRS文档")
-                raise ValueError("LLM返回空内容，无法生成SRS文档")
+            # 添加重试机制，处理LLM返回空内容的情况
+            max_retries = Config.MAX_RETRIES
+            retry_delay = Config.RETRY_DELAY
+            generated_doc = None
+            
+            for attempt in range(max_retries + 1):
+                if attempt > 0:
+                    # 指数退避：延迟时间 = 初始延迟 * 2^(attempt-1)
+                    delay = retry_delay * (2 ** (attempt - 1))
+                    self.logger.warning(f"LLM返回空内容，第 {attempt + 1}/{max_retries + 1} 次重试，等待 {delay:.1f} 秒后重试...")
+                    import time
+                    time.sleep(delay)
+                
+                generated_doc = stream_with_continuation(
+                    client=self.client,
+                    base_api_params=base_api_params,
+                    messages=messages,
+                    task_name="文档生成"
+                )
+                
+                if generated_doc and generated_doc.strip():
+                    # 成功生成文档
+                    if attempt > 0:
+                        self.logger.info(f"重试成功（第 {attempt + 1} 次尝试）")
+                    doc_tokens = count_text_tokens(generated_doc)
+                    doc_token_str = f"{doc_tokens} tokens" if doc_tokens is not None else f"{len(generated_doc)} 字符"
+                    self.logger.info(f"文档生成完成，长度: {doc_token_str}")
+                    self.logger.debug("完整响应内容:")
+                    self.logger.debug(generated_doc)
+                    return generated_doc
+                else:
+                    # 返回空内容，继续重试
+                    if attempt < max_retries:
+                        continue
+                    else:
+                        # 所有重试都失败
+                        self.logger.error(f"所有 {max_retries + 1} 次尝试均失败，LLM返回空内容，无法生成SRS文档")
+                        raise ValueError("LLM返回空内容，无法生成SRS文档")
 
         finally:
             self.timer.stop()

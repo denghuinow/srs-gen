@@ -64,13 +64,6 @@ def main():
     )
     
     parser.add_argument(
-        "--max-iterations",
-        type=int,
-        default=None,
-        help="最大迭代次数（默认：从环境变量MAX_ITERATIONS或配置中读取，默认值为5）"
-    )
-    
-    parser.add_argument(
         "--max-new-requirements-per-iteration",
         type=int,
         default=None,
@@ -85,13 +78,56 @@ def main():
     )
     
     parser.add_argument(
-        "--enable-parallel-generation",
+        "--gen",
+        nargs="+",
+        required=True,
+        help="指定需要生成的版本：no-explore-clarify、no-clarify、数字（迭代次数）。必须至少指定一个数字版本。例如：--gen no-explore-clarify no-clarify 2 4 6"
+    )
+    
+    parser.add_argument(
+        "--resume-from-checkpoint",
+        type=str,
+        default=None,
+        help="从指定的checkpoint文件恢复执行（checkpoint文件路径）"
+    )
+    
+    parser.add_argument(
+        "--auto-resume",
         action="store_true",
-        default=False,
-        help="启用并行生成功能：在运行过程中自动生成no-explore-clarify、no-clarify和所有迭代版本的SRS文档"
+        default=True,
+        help="自动从最新checkpoint恢复（默认：启用）"
+    )
+    
+    parser.add_argument(
+        "--no-auto-resume",
+        dest="auto_resume",
+        action="store_false",
+        help="禁用自动从checkpoint恢复"
     )
     
     args = parser.parse_args()
+    
+    # 解析--gen参数
+    gen_versions = set()
+    numbers = []
+    for item in args.gen:
+        if item == "no-explore-clarify" or item == "no-clarify":
+            gen_versions.add(item)
+        else:
+            try:
+                num = int(item)
+                numbers.append(num)
+                gen_versions.add(num)
+            except ValueError:
+                print(f"错误：无效的--gen参数值 '{item}'。必须是 'no-explore-clarify'、'no-clarify' 或数字", file=sys.stderr)
+                sys.exit(1)
+    
+    # 必须至少指定一个数字版本
+    if not numbers:
+        print("错误：必须至少指定一个数字版本（迭代次数）", file=sys.stderr)
+        sys.exit(1)
+    
+    max_iterations = max(numbers)
     
     # 加载输入
     if Path(args.input).exists():
@@ -131,13 +167,14 @@ def main():
     logger = get_logger("Main")
     
     # 运行工作流
-    logger.info(f"开始运行SRS编制系统（模式：{args.ablation_mode}）...")
-    logger.info(f"输出目录：{output_dir.absolute()}")
-    logger.info(f"日志文件：{log_file_path}")
-    if args.prompt_version:
-        logger.info(f"提示词版本：{args.prompt_version}")
-    if args.enable_parallel_generation:
-        logger.info("并行生成功能已启用：将自动生成所有版本（no-explore-clarify、no-clarify、iter1-N）")
+    # 对版本进行排序（字符串在前，数字在后）
+    def sort_gen_versions(versions):
+        strings = sorted([v for v in versions if isinstance(v, str)])
+        numbers = sorted([v for v in versions if isinstance(v, int)])
+        return strings + numbers
+    
+    sorted_versions = sort_gen_versions(gen_versions)
+    logger.info(f"开始运行SRS编制系统（模式：{args.ablation_mode}，版本：{sorted_versions}，最大迭代：{max_iterations}）")
     
     orchestrator = WorkflowOrchestrator(
         ablation_mode=args.ablation_mode,  # type: ignore
@@ -145,112 +182,81 @@ def main():
     )
     
     try:
-        # 主输出目录就是output_dir（不创建子目录）
-        main_output_dir = output_dir
+        # srs_collection目录在output_dir的父目录下
+        srs_collection_dir = output_dir.parent / "srs_collection"
+        srs_collection_dir.mkdir(parents=True, exist_ok=True)
         
-        # 如果启用并行生成，需要确定srs_collection目录和任务名
-        srs_collection_dir = None
-        task_name = None
-        if args.enable_parallel_generation:
-            # srs_collection目录在output_dir的父目录下
-            srs_collection_dir = output_dir.parent / "srs_collection"
-            srs_collection_dir.mkdir(parents=True, exist_ok=True)
-            # 从输入文件路径提取任务名
-            input_path = Path(args.input)
-            if input_path.exists():
-                task_name = input_path.stem
-            else:
-                # 如果输入是文本，使用output_dir的名称作为任务名
-                task_name = output_dir.name
+        # 从输入文件路径提取任务名
+        input_path = Path(args.input)
+        if input_path.exists():
+            task_name = input_path.stem
+        else:
+            # 如果输入是文本，使用output_dir的名称作为任务名
+            task_name = output_dir.name
         
         result = orchestrator.run(
             raw_input=raw_input,
+            max_iterations=max_iterations,
             baseline_srs=baseline_srs,
             baseline_gend_srs=baseline_gend_srs,
             ablation_mode=args.ablation_mode,  # type: ignore
-            max_iterations=args.max_iterations,
             max_new_requirements_per_iteration=args.max_new_requirements_per_iteration,
-            output_dir_base=str(srs_collection_dir) if args.enable_parallel_generation else None,
-            task_name=task_name if args.enable_parallel_generation else None,
-            enable_parallel_generation=args.enable_parallel_generation
+            output_dir_base=str(srs_collection_dir),
+            task_name=task_name,
+            gen_versions=gen_versions,
+            resume_from_checkpoint=args.resume_from_checkpoint,
+            auto_resume=args.auto_resume,
+            checkpoint_dir=str(output_dir)  # checkpoint保存在任务自己的输出目录，而不是共享目录
         )
         
-        # 保存SRS文档（主流程的最终版本）
-        srs_path = main_output_dir / "srs_document.md"
-        with open(srs_path, "w", encoding="utf-8") as f:
-            f.write(result["srs_document"])
-        logger.info(f"主流程SRS文档已保存到：{srs_path}")
-        
-        # 保存对比报告（保存到主输出目录）
-        report_path = main_output_dir / "comparison_report.md"
+        # 保存对比报告
+        report_path = output_dir / "comparison_report.md"
         with open(report_path, "w", encoding="utf-8") as f:
             f.write(result["comparison_report"])
-        logger.info(f"对比报告已保存到：{report_path}")
         
-        # 复制输入文档到主输出目录
+        # 复制输入文档到输出目录
         input_path = Path(args.input)
         if input_path.exists():
-            # 如果是文件，使用规范命名：input_<原文件名>
             input_suffix = input_path.suffix
             input_stem = input_path.stem
-            input_dest = main_output_dir / f"input_{input_stem}{input_suffix}"
+            input_dest = output_dir / f"input_{input_stem}{input_suffix}"
             shutil.copy2(input_path, input_dest)
-            logger.info(f"输入文档已复制到：{input_dest}")
         else:
-            # 如果是文本内容，保存为文件
-            input_dest = main_output_dir / "input.txt"
+            input_dest = output_dir / "input.txt"
             with open(input_dest, "w", encoding="utf-8") as f:
                 f.write(raw_input)
-            logger.info(f"输入内容已保存到：{input_dest}")
         
-        # 复制基准文档到主输出目录
+        # 复制基准文档到输出目录
         if args.baseline_srs:
             baseline_path = Path(args.baseline_srs)
             if baseline_path.exists():
-                # 使用规范命名：baseline_srs_<原文件名> 或 baseline_srs.md
                 baseline_suffix = baseline_path.suffix
                 baseline_stem = baseline_path.stem
-                baseline_dest = main_output_dir / f"baseline_srs_{baseline_stem}{baseline_suffix}"
+                baseline_dest = output_dir / f"baseline_srs_{baseline_stem}{baseline_suffix}"
                 shutil.copy2(baseline_path, baseline_dest)
-                logger.info(f"基准文档已复制到：{baseline_dest}")
             else:
                 logger.warning(f"基准文档文件不存在：{baseline_path}")
         
-        # 复制基准生成的SRS文档到主输出目录
+        # 复制基准生成的SRS文档到输出目录
         if args.baseline_gend_srs:
             baseline_gend_path = Path(args.baseline_gend_srs)
             if baseline_gend_path.exists():
                 baseline_gend_suffix = baseline_gend_path.suffix
                 baseline_gend_stem = baseline_gend_path.stem
-                baseline_gend_dest = main_output_dir / f"baseline_gend_srs_{baseline_gend_stem}{baseline_gend_suffix}"
+                baseline_gend_dest = output_dir / f"baseline_gend_srs_{baseline_gend_stem}{baseline_gend_suffix}"
                 shutil.copy2(baseline_gend_path, baseline_gend_dest)
-                logger.info(f"基准生成的SRS文档已复制到：{baseline_gend_dest}")
             else:
                 logger.warning(f"基准生成的SRS文档文件不存在：{baseline_gend_path}")
         
         # 输出统计信息
-        logger.info("\n=== 执行统计 ===")
-        logger.info(f"总耗时：{result['total_time']:.2f}秒")
-        logger.info(f"最终需求数：{len(result['requirements'].requirements)}")
-        logger.info("\n各代理耗时：")
-        for agent, time_cost in result["timer_summary"].items():
-            logger.info(f"  {agent}: {time_cost:.2f}秒")
+        logger.info(f"执行完成：总耗时 {result['total_time']:.2f}秒，最终需求数 {len(result['requirements'].requirements)}")
         
-        # 输出并行生成结果
-        if args.enable_parallel_generation and result.get("parallel_generation_results"):
-            logger.info("\n=== 并行生成结果 ===")
-            for version_name, gen_result in result["parallel_generation_results"].items():
-                if gen_result.get("success"):
-                    logger.info(f"✓ {version_name}: {gen_result.get('path')}")
-                else:
-                    logger.error(f"✗ {version_name}: {gen_result.get('error')}")
-        
-        logger.info("\n执行完成！")
-        if args.enable_parallel_generation:
-            print(f"\n执行完成！所有文件已保存到：{output_dir.absolute()}")
-            print(f"主流程文档：{main_output_dir.absolute()}")
-        else:
-            print(f"\n执行完成！所有文件已保存到：{output_dir.absolute()}")
+        # 输出版本生成结果（仅显示失败）
+        if result.get("version_generation_results"):
+            failed_versions = [name for name, r in result["version_generation_results"].items() if not r.get("success")]
+            if failed_versions:
+                logger.warning(f"版本生成失败：{failed_versions}")
+        print(f"\n执行完成！所有文件已保存到：{output_dir.absolute()}")
         
     except Exception as e:
         logger.error(f"执行失败：{e}", exc_info=True)

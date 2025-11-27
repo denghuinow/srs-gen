@@ -10,6 +10,7 @@ from typing import List, Tuple, Optional
 import time
 from datetime import datetime
 import re
+import json
 
 # 导入配置以获取模型信息
 try:
@@ -89,6 +90,10 @@ def is_retryable_error(error_msg: str) -> bool:
         r"502",  # HTTP 502 Bad Gateway
         r"503",  # HTTP 503 Service Unavailable
         r"504",  # HTTP 504 Gateway Timeout
+        # max_tokens相关的错误可以重试（因为streaming.py会自动修复）
+        r"max_tokens.*错误.*可自动修复",
+        r"max_tokens.*too large",
+        r"max_completion_tokens.*too large",
     ]
     
     error_text = error_msg.lower()
@@ -98,10 +103,43 @@ def is_retryable_error(error_msg: str) -> bool:
     return False
 
 
-def is_task_completed(output_dir: Path) -> bool:
-    """检查任务是否已完成（检查关键输出文件是否存在）"""
-    srs_file = output_dir / "srs_document.md"
-    return srs_file.exists() and srs_file.is_file()
+def is_task_completed(output_dir: Path, gen_versions: List) -> bool:
+    """检查任务是否已完成（检查所有需要的版本是否都已生成）"""
+    task_name = output_dir.name
+    srs_collection_dir = output_dir.parent / "srs_collection"
+    
+    if not srs_collection_dir.exists():
+        return False
+    
+    # 检查所有需要的版本是否都已生成
+    for version in gen_versions:
+        if isinstance(version, str):
+            version_name = version
+        else:
+            version_name = f"iter{version}"
+        
+        version_dir = srs_collection_dir / f"srs_document_{version_name}"
+        doc_path = version_dir / f"{task_name}.md"
+        
+        if not doc_path.exists():
+            return False
+    
+    return True
+
+
+def get_latest_checkpoint(output_dir: Path) -> Optional[Path]:
+    """获取最新的checkpoint文件"""
+    checkpoint_dir = output_dir / "checkpoints"
+    if not checkpoint_dir.exists():
+        return None
+    
+    checkpoints = list(checkpoint_dir.glob("checkpoint_*.json"))
+    if not checkpoints:
+        return None
+    
+    # 按修改时间排序，返回最新的
+    checkpoints.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return checkpoints[0]
 
 
 def run_single_task(
@@ -110,20 +148,20 @@ def run_single_task(
     baseline_gend_file: Optional[Path],
     output_base_dir: Path,
     ablation_mode: str,
-    max_iterations: Optional[int],
     max_new_requirements_per_iteration: Optional[int],
     extra_args: List[str],
+    gen_versions: List,
     max_retries: int = 3,
     retry_delay: float = 5.0,
     skip_existing: bool = False,
-    enable_parallel_generation: bool = False
+    auto_resume: bool = True
 ) -> Tuple[str, bool, str]:
     """执行单个任务，带重试机制"""
     task_name = input_file.stem
     output_dir = output_base_dir / task_name
     
     # 如果启用跳过已生成的任务，且任务已完成，则直接返回
-    if skip_existing and is_task_completed(output_dir):
+    if skip_existing and is_task_completed(output_dir, gen_versions):
         return (task_name, True, "已跳过（任务已完成）")
     
     # 构建命令
@@ -143,23 +181,33 @@ def run_single_task(
     if baseline_gend_file:
         cmd.extend(["--baseline-gend-srs", str(baseline_gend_file)])
     
-    if max_iterations:
-        cmd.extend(["--max-iterations", str(max_iterations)])
-    
     if max_new_requirements_per_iteration:
         cmd.extend(["--max-new-requirements-per-iteration", str(max_new_requirements_per_iteration)])
     
-    # 添加并行生成参数（如果启用）
-    if enable_parallel_generation:
-        cmd.append("--enable-parallel-generation")
+    # 添加--gen参数（确保所有值都是字符串）
+    cmd.extend(["--gen"] + [str(v) for v in gen_versions])
     
     cmd.extend(extra_args)
     
     # 执行命令，带重试
     start_time = time.time()
     last_error = None
+    checkpoint_used = False
     
     for attempt in range(max_retries + 1):  # 0到max_retries，共max_retries+1次尝试
+        # 如果失败且启用自动恢复，尝试从checkpoint恢复
+        if attempt > 0 and auto_resume:
+            latest_checkpoint = get_latest_checkpoint(output_dir)
+            if latest_checkpoint:
+                # 添加--resume-from-checkpoint参数
+                checkpoint_cmd = cmd.copy()
+                # 移除可能已存在的--resume-from-checkpoint参数
+                checkpoint_cmd = [arg for arg in checkpoint_cmd if not arg.startswith("--resume-from-checkpoint")]
+                checkpoint_cmd.extend(["--resume-from-checkpoint", str(latest_checkpoint)])
+                cmd = checkpoint_cmd
+                checkpoint_used = True
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] {task_name}: 从checkpoint恢复: {latest_checkpoint.name}")
+        
         try:
             result = subprocess.run(
                 cmd,
@@ -169,9 +217,39 @@ def run_single_task(
                 check=True
             )
             elapsed_time = time.time() - start_time
+            
+            # 检查生成的版本
+            srs_collection_dir = output_base_dir / "srs_collection"
+            generated_versions = []
+            if srs_collection_dir.exists():
+                for version_dir in srs_collection_dir.glob("srs_document_*"):
+                    version_name = version_dir.name.replace("srs_document_", "")
+                    doc_path = version_dir / f"{task_name}.md"
+                    if doc_path.exists():
+                        generated_versions.append(version_name)
+            
+            # 排序版本：字符串在前，数字在后
+            def sort_version_key(v):
+                if v.startswith("iter"):
+                    try:
+                        return (1, int(v.replace("iter", "")))
+                    except:
+                        return (1, 0)
+                elif v in ["no-explore-clarify", "no-clarify"]:
+                    return (0, 0 if v == "no-explore-clarify" else 1)
+                else:
+                    return (1, 0)
+            
+            if generated_versions:
+                sorted_versions = sorted(generated_versions, key=sort_version_key)
+                version_info = f" [版本: {', '.join(sorted_versions)}]"
+            else:
+                version_info = ""
+            
             if attempt > 0:
-                return (task_name, True, f"成功 (耗时: {elapsed_time:.2f}秒, 重试: {attempt}次)")
-            return (task_name, True, f"成功 (耗时: {elapsed_time:.2f}秒)")
+                resume_info = " (从checkpoint恢复)" if checkpoint_used else ""
+                return (task_name, True, f"成功 (耗时: {elapsed_time:.2f}秒, 重试: {attempt}次){resume_info}{version_info}")
+            return (task_name, True, f"成功 (耗时: {elapsed_time:.2f}秒){version_info}")
         except subprocess.CalledProcessError as e:
             elapsed_time = time.time() - start_time
             # 优先使用 stderr，如果没有则使用 stdout，最后使用异常消息
@@ -313,17 +391,17 @@ def main():
     )
     
     parser.add_argument(
-        "--max-iterations",
-        type=int,
-        default=None,
-        help="最大迭代次数（可选）"
-    )
-    
-    parser.add_argument(
         "--max-new-requirements-per-iteration",
         type=int,
         default=None,
         help="每轮迭代新增需求数量（可选）"
+    )
+    
+    parser.add_argument(
+        "--gen",
+        nargs="+",
+        required=True,
+        help="指定需要生成的版本：no-explore-clarify、no-clarify、数字（迭代次数）。必须至少指定一个数字版本。例如：--gen no-explore-clarify no-clarify 2 4 6"
     )
     
     parser.add_argument(
@@ -370,13 +448,65 @@ def main():
     )
     
     parser.add_argument(
-        "--enable-parallel-generation",
+        "--auto-resume",
         action="store_true",
-        default=False,
-        help="启用并行生成功能：在运行过程中自动生成no-explore-clarify、no-clarify和所有迭代版本的SRS文档"
+        default=True,
+        help="自动从checkpoint恢复失败的任务（默认：启用）"
+    )
+    
+    parser.add_argument(
+        "--no-auto-resume",
+        dest="auto_resume",
+        action="store_false",
+        help="禁用自动从checkpoint恢复失败的任务"
+    )
+    
+    parser.add_argument(
+        "--startup-delay",
+        type=float,
+        default=0.0,
+        help="任务启动延迟（秒），用于避免API限流。每个任务提交前等待的时间，支持逐渐增加并发。默认：0（无延迟）"
+    )
+    
+    parser.add_argument(
+        "--startup-delay-growth",
+        type=float,
+        default=0.0,
+        help="启动延迟增长系数。如果设置，每个任务的延迟 = startup_delay * (1 + growth * task_index)。默认：0（固定延迟）"
     )
     
     args = parser.parse_args()
+    
+    # 解析--gen参数
+    gen_versions = set()
+    numbers = []
+    for item in args.gen:
+        if item == "no-explore-clarify" or item == "no-clarify":
+            gen_versions.add(item)
+        else:
+            try:
+                num = int(item)
+                numbers.append(num)
+                gen_versions.add(num)
+            except ValueError:
+                print(f"错误：无效的--gen参数值 '{item}'。必须是 'no-explore-clarify'、'no-clarify' 或数字", file=sys.stderr)
+                sys.exit(1)
+    
+    # 必须至少指定一个数字版本
+    if not numbers:
+        print("错误：必须至少指定一个数字版本（迭代次数）", file=sys.stderr)
+        sys.exit(1)
+    
+    max_iterations = max(numbers)
+    
+    # 将gen_versions转换为排序后的列表（字符串在前，数字在后）
+    def sort_gen_versions(versions):
+        """对版本列表进行排序：字符串在前，数字在后"""
+        strings = sorted([v for v in versions if isinstance(v, str)])
+        numbers = sorted([v for v in versions if isinstance(v, int)])
+        return strings + numbers
+    
+    gen_versions_list = sort_gen_versions(gen_versions)
     
     # 验证输入目录
     input_dir = Path(args.input_dir)
@@ -450,17 +580,7 @@ def main():
     input_files = sorted(set(input_files))
     
     print(f"找到 {len(input_files)} 个输入文件")
-    print(f"输出目录：{output_base_dir.absolute()}")
-    print(f"并行度：{args.parallel}")
-    print(f"消融模式：{args.ablation_mode}")
-    print(f"最大重试次数：{args.max_retries}")
-    print(f"重试延迟：{args.retry_delay}秒")
-    print(f"跳过已生成：{'是' if args.skip_existing else '否'}")
-    print(f"并行生成功能：{'启用' if args.enable_parallel_generation else '禁用'}")
-    if baseline_dir:
-        print(f"基准目录：{baseline_dir.absolute()}")
-    if baseline_gend_dir:
-        print(f"基准生成的SRS目录：{baseline_gend_dir.absolute()}")
+    print(f"配置：模式={args.ablation_mode}，并行度={args.parallel}，版本={gen_versions_list}，最大迭代={max_iterations}")
     print()
     
     # 准备任务列表
@@ -496,13 +616,13 @@ def main():
                 baseline_gend_file,
                 output_base_dir,
                 args.ablation_mode,
-                args.max_iterations,
                 args.max_new_requirements_per_iteration,
                 args.extra_args or [],
+                gen_versions_list,
                 args.max_retries,
                 args.retry_delay,
                 args.skip_existing,
-                args.enable_parallel_generation
+                args.auto_resume
             )
             # 添加输入文件信息到结果
             results.append((result[0], result[1], result[2], input_file))
@@ -510,11 +630,32 @@ def main():
             print(f"[{datetime.now().strftime('%H:%M:%S')}] {status} {result[0]}: {result[2]}")
     else:
         # 并行执行
-        print(f"并行执行模式（并行度：{args.parallel}）...")
+        startup_delay_info = ""
+        if args.startup_delay > 0:
+            if args.startup_delay_growth > 0:
+                startup_delay_info = f"，启动延迟：{args.startup_delay:.1f}秒（增长系数：{args.startup_delay_growth:.2f}）"
+            else:
+                startup_delay_info = f"，启动延迟：{args.startup_delay:.1f}秒"
+        print(f"并行执行模式（并行度：{args.parallel}{startup_delay_info}）...")
+        
         with ProcessPoolExecutor(max_workers=args.parallel) as executor:
-            # 提交所有任务
+            # 提交所有任务，带延迟启动
             future_to_task = {}
-            for input_file, baseline_file, baseline_gend_file in tasks:
+            submitted_count = 0
+            
+            for task_index, (input_file, baseline_file, baseline_gend_file) in enumerate(tasks):
+                # 计算当前任务的启动延迟
+                if args.startup_delay > 0:
+                    if args.startup_delay_growth > 0:
+                        # 延迟逐渐增长：delay = base_delay * (1 + growth * index)
+                        current_delay = args.startup_delay * (1 + args.startup_delay_growth * task_index)
+                    else:
+                        # 固定延迟
+                        current_delay = args.startup_delay
+                    
+                    if task_index > 0:  # 第一个任务不需要延迟
+                        time.sleep(current_delay)
+                
                 task_name = input_file.stem
                 future = executor.submit(
                     run_single_task,
@@ -523,15 +664,20 @@ def main():
                     baseline_gend_file,
                     output_base_dir,
                     args.ablation_mode,
-                    args.max_iterations,
                     args.max_new_requirements_per_iteration,
                     args.extra_args or [],
+                    gen_versions_list,
                     args.max_retries,
                     args.retry_delay,
                     args.skip_existing,
-                    args.enable_parallel_generation
+                    args.auto_resume
                 )
                 future_to_task[future] = (task_name, baseline_file, baseline_gend_file, input_file)
+                submitted_count += 1
+                
+                # 显示提交进度（每10个任务或最后一个任务）
+                if submitted_count % 10 == 0 or submitted_count == len(tasks):
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] 已提交 {submitted_count}/{len(tasks)} 个任务...")
             
             # 处理完成的任务
             completed = 0
@@ -594,7 +740,6 @@ def main():
         f.write(f"使用的模型：{Config.OPENAI_MODEL}\n")
         
         # 记录迭代配置信息
-        max_iterations = args.max_iterations if args.max_iterations is not None else Config.MAX_ITERATIONS
         f.write(f"最大迭代轮次：{max_iterations}\n")
         
         # 记录每轮迭代新增需求数量
@@ -603,8 +748,11 @@ def main():
         
         f.write(f"最大重试次数：{args.max_retries}\n")
         f.write(f"重试延迟：{args.retry_delay}秒\n")
+        f.write(f"启动延迟：{args.startup_delay}秒\n")
+        if args.startup_delay_growth > 0:
+            f.write(f"启动延迟增长系数：{args.startup_delay_growth}\n")
         f.write(f"跳过已生成：{'是' if args.skip_existing else '否'}\n")
-        f.write(f"并行生成功能：{'启用' if args.enable_parallel_generation else '禁用'}\n")
+        f.write(f"生成版本：{gen_versions_list}\n")
         f.write(f"总任务数：{len(results)}\n")
         skipped_count = sum(1 for _, success, msg, _ in results if success and "已跳过" in msg)
         executed_count = success_count - skipped_count

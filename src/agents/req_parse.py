@@ -65,6 +65,11 @@ class ReqParseAgent:
             max_tokens = Config.get_max_tokens()
             if max_tokens is not None:
                 base_api_params["max_tokens"] = max_tokens
+            
+            # 使用 extra_body 传递额外参数（用于兼容支持这些参数的其他API）
+            base_api_params["extra_body"] = {
+                "repetition_penalty": 1.2,
+            }
 
             # 记录API调用参数
             self.logger.debug(f"API调用基础参数: {base_api_params}")

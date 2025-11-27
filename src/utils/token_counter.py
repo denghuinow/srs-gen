@@ -190,10 +190,15 @@ def calculate_adjusted_max_tokens(
         )
         return None
     
+    # 预留一些安全边距（至少预留100 tokens，用于特殊token和格式）
+    # 这样可以避免因为token计算误差导致的400错误
+    safety_margin = 100
+    safe_available_tokens = max(0, available_tokens - safety_margin)
+    
     # 如果配置了 max_tokens，取两者中的较小值
     if configured_max_tokens is not None:
-        return min(configured_max_tokens, available_tokens)
+        return min(configured_max_tokens, safe_available_tokens)
     
-    # 如果没有配置 max_tokens，返回可用 token 数量
-    return available_tokens
+    # 如果没有配置 max_tokens，返回安全的可用 token 数量
+    return safe_available_tokens if safe_available_tokens > 0 else None
 

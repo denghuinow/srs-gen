@@ -1,7 +1,7 @@
 """工作流编排 (FR-005, FR-006)"""
 import re
-import threading
 import copy
+import time
 from pathlib import Path
 from typing import Literal, Optional, List
 from langgraph.graph import StateGraph, END
@@ -16,6 +16,7 @@ from ..agents.doc_generate import DocGenerateAgent
 from ..utils.comparison import ComparisonReporter
 from ..utils.logger import get_logger
 from ..utils.token_counter import count_text_tokens
+from ..utils.checkpoint import CheckpointManager
 
 
 class WorkflowOrchestrator:
@@ -33,9 +34,11 @@ class WorkflowOrchestrator:
         # 初始化智能体（计时器将在状态中共享）
         self.timer_manager = None  # 将在run中初始化
         
-        # 并行生成线程管理
-        self.parallel_threads: List[threading.Thread] = []
-        self.parallel_thread_results: dict = {}  # 存储并行生成结果
+        # 版本生成结果管理
+        self.version_generation_results: dict = {}  # 存储版本生成结果
+        
+        # Checkpoint管理器（将在run中初始化）
+        self.checkpoint_manager: Optional[CheckpointManager] = None
     
     def _parse_node(self, state: WorkflowState) -> WorkflowState:
         """解析节点"""
@@ -44,9 +47,6 @@ class WorkflowOrchestrator:
         
         # requirement_structure 直接使用 raw_input，不再通过 ReqParseAgent 解析
         state["requirement_structure"] = state["raw_input"]  # type: ignore
-        raw_input_tokens = count_text_tokens(state['raw_input'])
-        raw_input_token_str = f"{raw_input_tokens} tokens" if raw_input_tokens is not None else f"{len(state['raw_input'])} 字符"
-        self.logger.info(f"需求结构直接使用用户输入，长度: {raw_input_token_str}")
         
         # 如果存在 baseline_gend_srs，使用 ReqParseAgent 解析它生成需求语义单元
         baseline_gend_srs = state.get("baseline_gend_srs", "")
@@ -54,23 +54,18 @@ class WorkflowOrchestrator:
             agent = ReqParseAgent(self.client, self.timer_manager, prompt_version=self.prompt_version)
             baseline_requirement_structure = agent.parse(baseline_gend_srs, input_type="基准生成的SRS")
             state["baseline_requirement_structure"] = baseline_requirement_structure  # type: ignore
-            baseline_tokens = count_text_tokens(baseline_requirement_structure)
-            baseline_token_str = f"{baseline_tokens} tokens" if baseline_tokens is not None else f"{len(baseline_requirement_structure)} 字符"
-            self.logger.info(f"基准需求语义单元生成完成，长度: {baseline_token_str}")
         else:
             state["baseline_requirement_structure"] = ""  # type: ignore
         
-        # 如果启用并行生成，在parse后生成no-explore-clarify版本
-        if state.get("enable_parallel_generation", False):
-            output_dir_base = state.get("output_dir_base")
-            if output_dir_base:
-                state_snapshot = self._create_state_snapshot(state)
-                self._generate_parallel_srs(
-                    state_snapshot=state_snapshot,
-                    version_name="no-explore-clarify",
-                    output_dir_base=output_dir_base,
-                    ablation_mode="no-explore-clarify"
-                )
+        # 如果gen_versions包含"no-explore-clarify"，设置版本生成标记
+        gen_versions = state.get("gen_versions")
+        if gen_versions and "no-explore-clarify" in gen_versions:
+            state["_version_to_generate"] = "no-explore-clarify"  # type: ignore
+            state["_version_name"] = "no-explore-clarify"  # type: ignore
+        
+        # 保存checkpoint
+        if self.checkpoint_manager:
+            self.checkpoint_manager.save_checkpoint(state, "parse", state.get("iteration_count"))
         
         return state
     
@@ -87,12 +82,8 @@ class WorkflowOrchestrator:
 
         # 记录挖掘前的需求ID集合
         req_ids_before = set(req.id for req in state["requirements"].requirements)
-        self.logger.debug(f"[迭代 {state['iteration_count']}] 挖掘前需求ID集合: {sorted(req_ids_before)}")
 
         if self.ablation_mode == "no-explore-clarify":
-            self.logger.info(
-                f"[迭代 {state['iteration_count']}] no-explore-clarify 模式：跳过 ReqExplore，直接映射需求结构"
-            )
             requirement_structure = state.get("requirement_structure", "")  # type: ignore
             state["requirements"] = self._build_requirements_from_structure(
                 requirement_structure,
@@ -122,28 +113,21 @@ class WorkflowOrchestrator:
             state["requirements"] = new_requirements
             state["req_explore_messages"] = updated_messages  # type: ignore
         
-        # 记录挖掘后的需求ID集合
-        req_ids_after = set(req.id for req in state["requirements"].requirements)
-        self.logger.debug(f"[迭代 {state['iteration_count']}] 挖掘后需求ID集合: {sorted(req_ids_after)}")
-        
         # 计算新增的需求
+        req_ids_after = set(req.id for req in state["requirements"].requirements)
         new_req_ids = req_ids_after - req_ids_before
         if new_req_ids:
             self.logger.info(f"[迭代 {state['iteration_count']}] 挖掘阶段新增需求: {sorted(new_req_ids)}")
-        else:
-            self.logger.debug(f"[迭代 {state['iteration_count']}] 挖掘阶段无新增需求")
         
-        # 如果启用并行生成，在第一次explore后生成no-clarify版本
-        if state.get("enable_parallel_generation", False) and state["iteration_count"] == 1:
-            output_dir_base = state.get("output_dir_base")
-            if output_dir_base:
-                state_snapshot = self._create_state_snapshot(state)
-                self._generate_parallel_srs(
-                    state_snapshot=state_snapshot,
-                    version_name="no-clarify",
-                    output_dir_base=output_dir_base,
-                    ablation_mode="no-clarify"
-                )
+        # 如果gen_versions包含"no-clarify"且是第一次迭代，设置版本生成标记
+        gen_versions = state.get("gen_versions")
+        if gen_versions and "no-clarify" in gen_versions and state["iteration_count"] == 1:
+            state["_version_to_generate"] = "no-clarify"  # type: ignore
+            state["_version_name"] = "no-clarify"  # type: ignore
+        
+        # 保存checkpoint
+        if self.checkpoint_manager:
+            self.checkpoint_manager.save_checkpoint(state, "explore", state.get("iteration_count"))
         
         return state
 
@@ -242,13 +226,8 @@ class WorkflowOrchestrator:
     
     def _clarify_node(self, state: WorkflowState) -> WorkflowState:
         """澄清节点"""
-        # 记录澄清前的需求ID集合
-        req_ids_before = set(req.id for req in state["requirements"].requirements)
-        self.logger.debug(f"[迭代 {state['iteration_count']}] 澄清前需求ID集合: {sorted(req_ids_before)}")
-        
         if self.ablation_mode in ["no-clarify", "no-explore-clarify"]:
             # 跳过澄清，默认0分
-            self.logger.info(f"[迭代 {state['iteration_count']}] 消融模式，跳过澄清阶段")
             for req in state["requirements"].requirements:
                 if req.score is None:
                     req.score = 0
@@ -258,13 +237,18 @@ class WorkflowOrchestrator:
                         0,
                         "消融模式：默认0分"
                     )
-            # 在消融模式下，不进行负分过滤，所有需求都保留
-            req_ids_after = set(req.id for req in state["requirements"].requirements)
-            self.logger.debug(f"[迭代 {state['iteration_count']}] 澄清后需求ID集合: {sorted(req_ids_after)}")
             return state
+        
+        # 记录澄清开始时间
+        clarify_start_time = time.time()
         
         agent = ReqClarifyAgent(self.client, state["timer_manager"], prompt_version=self.prompt_version)
         results = agent.clarify(state["requirements"], state["baseline_srs"])
+        
+        # 计算本次澄清耗时并累计
+        clarify_elapsed_time = time.time() - clarify_start_time
+        cumulative_clarify_time = state.get("_cumulative_clarify_time", 0.0)  # type: ignore
+        state["_cumulative_clarify_time"] = cumulative_clarify_time + clarify_elapsed_time  # type: ignore
         
         # 保存评分结果到 state，供下次 explore 使用
         state["clarification_results"] = results  # type: ignore
@@ -296,240 +280,209 @@ class WorkflowOrchestrator:
                 # 没有评分结果的需求保留
                 # 如果原需求 score < 2，将 score 设为 None，以便下次迭代时重新评分
                 if req.score is not None and req.score < 2:
-                    old_score = req.score
                     req.score = None
-                    self.logger.debug(f"需求 {req.id} 原评分 {old_score} < 2，但未获得新评分，将 score 设为 None 以便下次重新评分")
                 if not new_requirements.add(req):
                     self.logger.warning(f"需求 {req.id} 在澄清阶段重复添加，已跳过")
         
         state["requirements"] = new_requirements
         
-        # 记录澄清后的需求ID集合
-        req_ids_after = set(req.id for req in state["requirements"].requirements)
-        self.logger.debug(f"[迭代 {state['iteration_count']}] 澄清后需求ID集合: {sorted(req_ids_after)}")
-        
-        # 统计负分需求数量（用于日志）
+        # 统计负分需求数量
         negative_count = sum(1 for req in state["requirements"].requirements 
                            if req.score is not None and req.score < 0)
         if negative_count > 0:
-            self.logger.info(f"[迭代 {state['iteration_count']}] 保留负分需求数量: {negative_count}（将在下一轮迭代中改进）")
+            self.logger.info(f"[迭代 {state['iteration_count']}] 保留负分需求数量: {negative_count}")
         
-        # 如果启用并行生成，在每次clarify后生成iter{N}版本
-        if state.get("enable_parallel_generation", False):
-            output_dir_base = state.get("output_dir_base")
-            if output_dir_base:
-                iteration = state["iteration_count"]
-                state_snapshot = self._create_state_snapshot(state)
-                self._generate_parallel_srs(
-                    state_snapshot=state_snapshot,
-                    version_name=f"iter{iteration}",
-                    output_dir_base=output_dir_base,
-                    iteration=iteration
-                )
+        # 如果gen_versions包含当前迭代次数，设置版本生成标记
+        gen_versions = state.get("gen_versions")
+        iteration = state["iteration_count"]
+        if gen_versions and iteration in gen_versions:
+            state["_version_to_generate"] = "iter"  # type: ignore
+            state["_version_name"] = f"iter{iteration}"  # type: ignore
+        
+        # 保存checkpoint
+        if self.checkpoint_manager:
+            self.checkpoint_manager.save_checkpoint(state, "clarify", state.get("iteration_count"))
         
         return state
     
-    def _check_convergence(self, state: WorkflowState) -> Literal["continue", "generate"]:
-        """检查收敛条件"""
+    def _route_after_parse(self, state: WorkflowState) -> Literal["generate_version", "explore"]:
+        """parse节点后的路由函数"""
+        gen_versions = state.get("gen_versions")
+        if gen_versions and "no-explore-clarify" in gen_versions:
+            return "generate_version"
+        return "explore"
+    
+    def _route_after_explore(self, state: WorkflowState) -> Literal["generate_version", "clarify"]:
+        """explore节点后的路由函数"""
+        gen_versions = state.get("gen_versions")
+        if gen_versions and "no-clarify" in gen_versions and state["iteration_count"] == 1:
+            return "generate_version"
+        return "clarify"
+    
+    def _route_after_clarify(self, state: WorkflowState) -> Literal["generate_version", "continue"]:
+        """clarify节点后的路由函数"""
+        gen_versions = state.get("gen_versions")
         iteration = state["iteration_count"]
-        req_count = len(state["requirements"].requirements)
         
-        # 计算当前迭代的需求变化（需要从状态中获取，这里简化处理）
-        self.logger.info(f"[迭代 {iteration}] 迭代总结:")
-        self.logger.info(f"  当前需求总数: {req_count}")
+        # 如果需要生成当前迭代的版本
+        if gen_versions and iteration in gen_versions:
+            return "generate_version"
         
-        # no-explore-clarify模式：第一次迭代后直接生成
-        if self.ablation_mode == "no-explore-clarify":
-            state["convergence_reached"] = True
-            self.logger.info(f"[迭代 {iteration}] 收敛判断: no-explore-clarify模式，直接生成")
-            return "generate"
-        
-        # 检查是否有负分条目（用于日志记录）
-        has_negative = any(
-            req.score is not None and req.score < 0
-            for req in state["requirements"].requirements
-        )
-        
-        # 检查是否达到最大迭代次数（从状态中获取，如果未设置则使用配置默认值）
+        # 检查是否达到最大迭代次数
         max_iterations = state.get("max_iterations", Config.MAX_ITERATIONS)  # type: ignore
-        
-        # 计算下一轮迭代的迭代号（当前迭代号+1）
         next_iteration = iteration + 1
         
-        # 如果下一轮迭代号超过最大迭代次数，则停止（迭代从1开始）
         if next_iteration > max_iterations:
-            state["convergence_reached"] = True
-            self.logger.info(f"[迭代 {iteration}] 收敛判断: 达到最大迭代次数 ({max_iterations})，下一迭代将是 {next_iteration}，停止迭代")
-            return "generate"
+            # 最后一次迭代，应该在gen_versions中（因为最大数字就是迭代次数）
+            # 如果不在，说明有bug，但我们仍然尝试生成
+            self.logger.warning(f"最后一次迭代 {iteration} 不在gen_versions中，但已达到最大迭代次数，继续生成")
+            # 设置版本标记，以便generate节点能生成
+            state["_version_to_generate"] = "iter"  # type: ignore
+            state["_version_name"] = f"iter{iteration}"  # type: ignore
+            return "generate_version"
         
-        negative_info = "存在负分条目" if has_negative else "无负分条目"
-        self.logger.info(f"[迭代 {iteration}] 收敛判断: {negative_info}，继续迭代 -> 迭代 {next_iteration}（强制迭代到最大次数 {max_iterations}）")
         return "continue"
     
-    def _generate_parallel_srs(
-        self,
-        state_snapshot: dict,
-        version_name: str,
-        output_dir_base: str,
-        ablation_mode: Optional[str] = None,
-        iteration: Optional[int] = None
-    ) -> None:
-        """在子线程中生成特定版本的SRS
+    def _route_after_generate(self, state: WorkflowState) -> Literal["explore", "clarify", "end"]:
+        """generate节点后的路由函数"""
+        version_name = state.get("_last_generated_version")
         
-        Args:
-            state_snapshot: 状态快照（包含requirements等关键数据）
-            version_name: 版本名称（如 "no-explore-clarify", "no-clarify", "iter1"）
-            output_dir_base: 输出目录基础路径
-            ablation_mode: 消融模式（用于no-explore-clarify和no-clarify）
-            iteration: 迭代次数（用于iter版本）
-        """
-        def generate_in_thread():
+        # 如果生成了no-explore-clarify版本，需要继续到explore
+        if version_name == "no-explore-clarify":
+            state["_last_generated_version"] = None  # type: ignore
+            return "explore"
+        # 如果生成了no-clarify版本，需要继续到clarify
+        if version_name == "no-clarify":
+            state["_last_generated_version"] = None  # type: ignore
+            return "clarify"
+        # 如果生成了iter版本，检查是否还有下一轮迭代
+        if version_name and version_name.startswith("iter"):
             try:
-                thread_logger = get_logger(f"ParallelGen-{version_name}")
-                thread_logger.info(f"开始并行生成 {version_name} 版本的SRS文档...")
-                
-                # 创建独立的DocGenerateAgent（使用新的OpenAI客户端）
-                client = OpenAI(**Config.get_openai_client_kwargs())
-                timer_manager = state_snapshot.get("timer_manager")
-                if timer_manager is None:
-                    from ..utils.timer import TimerManager
-                    timer_manager = TimerManager()
-                
-                agent = DocGenerateAgent(client, timer_manager, prompt_version=self.prompt_version)
-                
-                # 根据版本类型确定需求列表和参数
-                raw_input = state_snapshot.get("raw_input", "")
-                requirement_structure = state_snapshot.get("requirement_structure", "")
-                baseline_requirement_structure = state_snapshot.get("baseline_requirement_structure", "")
-                
-                # 确定ablation_mode
-                if ablation_mode:
-                    final_ablation_mode = ablation_mode
-                elif iteration:
-                    final_ablation_mode = "default"
+                iter_num = int(version_name.replace("iter", ""))
+                max_iterations = state.get("max_iterations", Config.MAX_ITERATIONS)  # type: ignore
+                state["_last_generated_version"] = None  # type: ignore
+                if iter_num >= max_iterations:
+                    # 最后一次迭代，结束
+                    return "end"
                 else:
-                    final_ablation_mode = "default"
-                
-                # 根据版本类型处理需求列表
-                if ablation_mode == "no-explore-clarify":
-                    # no-explore-clarify模式：直接使用requirement_structure，不需要requirements
-                    requirements = RequirementList()
-                elif ablation_mode == "no-clarify":
-                    # no-clarify模式：使用当前requirements，但所有需求score设为0
-                    requirements = copy.deepcopy(state_snapshot.get("requirements", RequirementList()))
-                    for req in requirements.requirements:
-                        if req.score is None:
-                            req.score = 0
-                elif iteration is not None:
-                    # iter版本：筛选历史得分>=1的需求
-                    requirements = copy.deepcopy(state_snapshot.get("requirements", RequirementList()))
-                    score_history = state_snapshot.get("score_history")
-                    if score_history:
-                        filtered_requirements = RequirementList()
-                        for req in requirements.requirements:
-                            best_score = score_history.get_best_score(req.id)
-                            if best_score is not None and best_score >= 1:
-                                filtered_requirements.requirements.append(req)
-                        requirements = filtered_requirements
-                else:
-                    # 默认：使用所有需求
-                    requirements = copy.deepcopy(state_snapshot.get("requirements", RequirementList()))
-                
-                # 生成SRS文档
-                srs_document = agent.generate(
-                    requirements,
-                    raw_input=raw_input,
-                    requirement_structure=requirement_structure,
-                    ablation_mode=final_ablation_mode,
-                    baseline_requirement_structure=baseline_requirement_structure
-                )
-                
-                # 保存到srs_collection目录下的版本子目录
+                    # 还有下一轮迭代，继续到explore
+                    return "explore"
+            except ValueError:
+                state["_last_generated_version"] = None  # type: ignore
+                return "explore"
+        # 否则结束
+        state["_last_generated_version"] = None  # type: ignore
+        return "end"
+    
+    def _generate_node(self, state: WorkflowState) -> WorkflowState:
+        """生成节点"""
+        agent = DocGenerateAgent(self.client, state["timer_manager"], prompt_version=self.prompt_version)
+        
+        version_to_generate = state.get("_version_to_generate")
+        version_name = state.get("_version_name")
+        
+        # 记录版本生成开始时间（仅计算文档生成时间，不包括文件I/O）
+        version_gen_start_time = time.time()
+        
+        # 根据版本类型处理需求列表
+        if version_to_generate == "no-explore-clarify":
+            # no-explore-clarify模式：直接使用requirement_structure，不需要requirements
+            requirements = RequirementList()
+            ablation_mode = "no-explore-clarify"
+        elif version_to_generate == "no-clarify":
+            # no-clarify模式：使用当前requirements，但所有需求score设为0
+            requirements = copy.deepcopy(state.get("requirements", RequirementList()))
+            for req in requirements.requirements:
+                if req.score is None:
+                    req.score = 0
+            ablation_mode = "no-clarify"
+        elif version_to_generate == "iter":
+            # iter版本：筛选历史得分>=1的需求
+            requirements = copy.deepcopy(state.get("requirements", RequirementList()))
+            score_history = state.get("score_history")
+            if score_history:
+                filtered_requirements = RequirementList()
+                for req in requirements.requirements:
+                    best_score = score_history.get_best_score(req.id)
+                    if best_score is not None and best_score >= 1:
+                        filtered_requirements.requirements.append(req)
+                requirements = filtered_requirements
+            ablation_mode = "default"
+        else:
+            # 默认：基于历史得分筛选
+            requirements = RequirementList()
+            for req in state["requirements"].requirements:
+                best_score = state["score_history"].get_best_score(req.id)
+                if best_score is not None and best_score >= 1:
+                    requirements.requirements.append(req)
+            ablation_mode = state.get("ablation_mode", "default")  # type: ignore
+        
+        # 获取需求结构
+        requirement_structure = state.get("requirement_structure", "")  # type: ignore
+        baseline_requirement_structure = state.get("baseline_requirement_structure", "")  # type: ignore
+        
+        # 生成SRS文档
+        srs_document = agent.generate(
+            requirements,
+            raw_input=state["raw_input"],
+            requirement_structure=requirement_structure,
+            ablation_mode=ablation_mode,
+            baseline_requirement_structure=baseline_requirement_structure
+        )
+        
+        # 记录版本生成结束时间（文档生成完成）
+        version_gen_end_time = time.time()
+        version_gen_elapsed_time = version_gen_end_time - version_gen_start_time
+        
+        # 如果指定了版本名称，保存到srs_collection目录并计算净耗时
+        if version_name:
+            output_dir_base = state.get("output_dir_base")
+            if output_dir_base:
                 output_dir = Path(output_dir_base) / f"srs_document_{version_name}"
                 output_dir.mkdir(parents=True, exist_ok=True)
                 
-                # 使用任务名作为文件名
-                task_name = state_snapshot.get("task_name", "srs_document")
+                task_name = state.get("task_name", "srs_document")
                 doc_name = f"{task_name}.md"
                 srs_path = output_dir / doc_name
                 
                 with open(srs_path, "w", encoding="utf-8") as f:
                     f.write(srs_document)
                 
-                thread_logger.info(f"✓ {version_name} 版本SRS文档已保存到：{srs_path}")
-                self.parallel_thread_results[version_name] = {"success": True, "path": str(srs_path)}
+                # 计算净耗时
+                start_time = state.get("_workflow_start_time", 0.0)  # type: ignore
+                cumulative_clarify_time = state.get("_cumulative_clarify_time", 0.0)  # type: ignore
+                cumulative_version_gen_time = state.get("_cumulative_version_gen_time", 0.0)  # type: ignore
                 
-            except Exception as e:
-                thread_logger = get_logger(f"ParallelGen-{version_name}")
-                thread_logger.error(f"✗ {version_name} 版本生成失败：{e}", exc_info=True)
-                self.parallel_thread_results[version_name] = {"success": False, "error": str(e)}
+                current_time = version_gen_end_time
+                total_time = current_time - start_time
+                net_time = total_time - cumulative_clarify_time - cumulative_version_gen_time
+                
+                self.version_generation_results[version_name] = {
+                    "success": True,
+                    "path": str(srs_path),
+                    "content": srs_document,
+                    "net_time": net_time,
+                    "total_time": total_time,
+                    "cumulative_clarify_time": cumulative_clarify_time,
+                    "cumulative_version_gen_time": cumulative_version_gen_time,
+                    "version_gen_time": version_gen_elapsed_time
+                }
+                
+                # 累计版本生成耗时
+                state["_cumulative_version_gen_time"] = cumulative_version_gen_time + version_gen_elapsed_time  # type: ignore
         
-        # 启动子线程
-        thread = threading.Thread(target=generate_in_thread, daemon=True)
-        thread.start()
-        self.parallel_threads.append(thread)
-        self.logger.info(f"已启动并行生成线程：{version_name}")
-    
-    def _create_state_snapshot(self, state: WorkflowState) -> dict:
-        """创建状态快照（深拷贝关键数据）"""
-        from ..utils.score_history import ScoreHistory
+        # 保存最后生成的版本名称，供路由函数使用
+        if version_name:
+            state["_last_generated_version"] = version_name  # type: ignore
         
-        # 深拷贝score_history
-        score_history = state.get("score_history")
-        if score_history:
-            # ScoreHistory可能没有深拷贝方法，需要手动复制
-            copied_score_history = ScoreHistory()
-            if hasattr(score_history, 'history'):
-                copied_score_history.history = copy.deepcopy(score_history.history)
-        else:
-            copied_score_history = ScoreHistory()
+        # 清除版本生成标记
+        state["_version_to_generate"] = None  # type: ignore
+        state["_version_name"] = None  # type: ignore
         
-        return {
-            "requirements": copy.deepcopy(state.get("requirements", RequirementList())),
-            "raw_input": state.get("raw_input", ""),
-            "requirement_structure": state.get("requirement_structure", ""),
-            "baseline_requirement_structure": state.get("baseline_requirement_structure", ""),
-            "score_history": copied_score_history,
-            "timer_manager": state.get("timer_manager"),  # 共享timer_manager
-            "task_name": state.get("task_name"),  # 任务名
-        }
-    
-    def _generate_node(self, state: WorkflowState) -> WorkflowState:
-        """生成节点"""
-        agent = DocGenerateAgent(self.client, state["timer_manager"], prompt_version=self.prompt_version)
+        # 保存checkpoint
+        if self.checkpoint_manager:
+            self.checkpoint_manager.save_checkpoint(state, "generate", state.get("iteration_count"))
         
-        # 基于历史得分筛选：只要历史中曾经有过>=1的得分，就进入文档生成
-        filtered_requirements = RequirementList()
-        excluded_ids = []
-        
-        for req in state["requirements"].requirements:
-            best_score = state["score_history"].get_best_score(req.id)
-            if best_score is not None and best_score >= 1:
-                filtered_requirements.requirements.append(req)
-            else:
-                excluded_ids.append(req.id)
-        
-        # 记录过滤信息
-        total_count = len(state["requirements"].requirements)
-        filtered_count = len(filtered_requirements.requirements)
-        if total_count != filtered_count:
-            self.logger.info(f"文档生成：从 {total_count} 个需求中筛选出 {filtered_count} 个历史得分>=1的需求")
-            if excluded_ids:
-                self.logger.debug(f"被排除的需求ID: {sorted(excluded_ids)}")
-        
-        # 获取需求结构（用于no-explore-clarify模式）
-        requirement_structure = state.get("requirement_structure", "")  # type: ignore
-        ablation_mode = state.get("ablation_mode", "default")  # type: ignore
-        baseline_requirement_structure = state.get("baseline_requirement_structure", "")  # type: ignore
-        
-        srs_doc = agent.generate(
-            filtered_requirements,
-            raw_input=state["raw_input"],
-            requirement_structure=requirement_structure,
-            ablation_mode=ablation_mode,
-            baseline_requirement_structure=baseline_requirement_structure
-        )
-        state["_srs_document"] = srs_doc  # type: ignore
         return state
     
     def build_graph(self) -> StateGraph:
@@ -545,32 +498,60 @@ class WorkflowOrchestrator:
         # 设置入口
         workflow.set_entry_point("parse")
         
-        # 添加边
-        workflow.add_edge("parse", "explore")
-        workflow.add_edge("explore", "clarify")
+        # 添加条件边
         workflow.add_conditional_edges(
-            "clarify",
-            self._check_convergence,
+            "parse",
+            self._route_after_parse,
             {
-                "continue": "explore",
-                "generate": "generate"
+                "generate_version": "generate",
+                "explore": "explore"
             }
         )
-        workflow.add_edge("generate", END)
+        
+        workflow.add_conditional_edges(
+            "explore",
+            self._route_after_explore,
+            {
+                "generate_version": "generate",
+                "clarify": "clarify"
+            }
+        )
+        
+        workflow.add_conditional_edges(
+            "clarify",
+            self._route_after_clarify,
+            {
+                "generate_version": "generate",
+                "continue": "explore"
+            }
+        )
+        
+        workflow.add_conditional_edges(
+            "generate",
+            self._route_after_generate,
+            {
+                "explore": "explore",
+                "clarify": "clarify",
+                "end": END
+            }
+        )
         
         return workflow.compile()
     
     def run(
         self,
         raw_input: str,
+        max_iterations: int,
         baseline_srs: str = "",
         baseline_gend_srs: str = "",
         ablation_mode: AblationMode = "default",
-        max_iterations: Optional[int] = None,
         max_new_requirements_per_iteration: Optional[int] = None,
         output_dir_base: Optional[str] = None,
         task_name: Optional[str] = None,
-        enable_parallel_generation: bool = False
+        gen_versions: Optional[set] = None,
+        resume_from_checkpoint: Optional[str] = None,
+        auto_resume: bool = True,
+        checkpoint_dir: Optional[str] = None
     ) -> dict:
         """运行工作流"""
         from ..utils.timer import TimerManager
@@ -579,44 +560,82 @@ class WorkflowOrchestrator:
         
         self.ablation_mode = ablation_mode
         
-        # 初始化状态
-        initial_state: WorkflowState = {
-            "raw_input": raw_input,
-            "baseline_srs": baseline_srs,
-            "baseline_gend_srs": baseline_gend_srs,
-            "requirements": RequirementList(),
-            "score_history": ScoreHistory(),
-            "timer_manager": TimerManager(),
-            "iteration_count": 1,  # 迭代从1开始
-            "ablation_mode": ablation_mode,
-            "convergence_reached": False,
-            "max_iterations": max_iterations if max_iterations is not None else Config.MAX_ITERATIONS,  # type: ignore
-            "max_new_requirements_per_iteration": max_new_requirements_per_iteration,  # type: ignore
-            "req_explore_messages": None,  # type: ignore
-            "clarification_results": None,  # type: ignore
-            "output_dir_base": output_dir_base,  # type: ignore
-            "task_name": task_name,  # type: ignore
-            "parallel_generation_threads": None,  # type: ignore
-            "enable_parallel_generation": enable_parallel_generation  # type: ignore
-        }
+        # 初始化checkpoint管理器
+        # checkpoint保存在任务自己的输出目录，而不是共享的srs_collection目录
+        # 这样可以避免并行任务之间的checkpoint冲突
+        if checkpoint_dir:
+            self.checkpoint_manager = CheckpointManager(checkpoint_dir)
+        else:
+            self.checkpoint_manager = None
         
-        # 开始计时
-        initial_state["timer_manager"].start_total()
+        # 尝试从checkpoint恢复
+        initial_state: Optional[WorkflowState] = None
+        if resume_from_checkpoint:
+            # 手动指定checkpoint路径
+            checkpoint_path = Path(resume_from_checkpoint)
+            if checkpoint_path.exists():
+                initial_state = self.checkpoint_manager.load_checkpoint(checkpoint_path) if self.checkpoint_manager else None
+                if initial_state:
+                    self.logger.info(f"从指定checkpoint恢复: {checkpoint_path}")
+        elif auto_resume and self.checkpoint_manager:
+            # 自动查找最新checkpoint
+            initial_state = self.checkpoint_manager.load_checkpoint()
+            if initial_state:
+                self.logger.info("从最新checkpoint自动恢复")
+        
+        # 如果没有从checkpoint恢复，创建新状态
+        if initial_state is None:
+            initial_state = {
+                "raw_input": raw_input,
+                "baseline_srs": baseline_srs,
+                "baseline_gend_srs": baseline_gend_srs,
+                "requirements": RequirementList(),
+                "score_history": ScoreHistory(),
+                "timer_manager": TimerManager(),
+                "iteration_count": 1,  # 迭代从1开始
+                "ablation_mode": ablation_mode,
+                "convergence_reached": False,
+                "max_iterations": max_iterations,  # type: ignore
+                "max_new_requirements_per_iteration": max_new_requirements_per_iteration,  # type: ignore
+                "req_explore_messages": None,  # type: ignore
+                "clarification_results": None,  # type: ignore
+                "output_dir_base": output_dir_base,  # type: ignore
+                "task_name": task_name,  # type: ignore
+                "gen_versions": gen_versions,  # type: ignore
+                "_version_to_generate": None,  # type: ignore
+                "_version_name": None,  # type: ignore
+                "_last_generated_version": None,  # type: ignore
+                "_cumulative_clarify_time": 0.0,  # type: ignore
+                "_cumulative_version_gen_time": 0.0  # type: ignore
+            }
+            
+            # 开始计时并保存开始时间
+            initial_state["timer_manager"].start_total()
+            workflow_start_time = initial_state["timer_manager"].total_start_time
+            if workflow_start_time is None:
+                workflow_start_time = time.time()
+            initial_state["_workflow_start_time"] = workflow_start_time  # type: ignore
+        else:
+            # 从checkpoint恢复，确保关键字段存在
+            if "output_dir_base" not in initial_state:
+                initial_state["output_dir_base"] = output_dir_base  # type: ignore
+            if "task_name" not in initial_state:
+                initial_state["task_name"] = task_name  # type: ignore
+            if "gen_versions" not in initial_state:
+                initial_state["gen_versions"] = gen_versions  # type: ignore
+            # 确保timer_manager已初始化
+            if "timer_manager" not in initial_state or initial_state["timer_manager"] is None:
+                initial_state["timer_manager"] = TimerManager()
+                initial_state["timer_manager"].start_total()
+                if "_workflow_start_time" not in initial_state:
+                    initial_state["_workflow_start_time"] = time.time()  # type: ignore
         
         # 构建并运行工作流
         graph = self.build_graph()
         
-        # 计算递归限制：
-        # - parse 节点：1次
-        # - 每次迭代：explore (1) + clarify (1) + check_convergence (1) + 可能的额外节点 = 至少4-5次
-        # - generate 节点：1次
-        # 考虑到条件边和可能的额外调用，使用更保守的计算方式
+        # 计算递归限制
         max_iterations = initial_state.get("max_iterations", Config.MAX_ITERATIONS)  # type: ignore
-        # 每次迭代按 6 个节点计算（包含条件边可能触发的额外节点），加上更大的安全缓冲
-        recursion_limit = max(max_iterations * 6 + 50, 100)  # 至少保证 100 的递归限制
-        self.logger.info(f"设置 LangGraph 递归限制: {recursion_limit} (最大迭代次数: {max_iterations})")
-        
-        # 设置 LangGraph 配置，增加递归限制
+        recursion_limit = max(max_iterations * 6 + 50, 100)
         config = {"recursion_limit": recursion_limit}
         final_state = graph.invoke(initial_state, config=config)
         
@@ -632,27 +651,70 @@ class WorkflowOrchestrator:
             ablation_mode
         )
         
-        # 等待所有并行生成线程完成
-        if enable_parallel_generation:
-            self.logger.info("等待所有并行生成线程完成...")
-            for thread in self.parallel_threads:
-                thread.join(timeout=300)  # 最多等待5分钟
-                if thread.is_alive():
-                    self.logger.warning(f"并行生成线程 {thread.name} 超时")
+        # 报告版本生成结果
+        if self.version_generation_results:
+            success_count = sum(1 for r in self.version_generation_results.values() if r.get("success"))
+            fail_count = len(self.version_generation_results) - success_count
+            if fail_count > 0:
+                self.logger.warning(f"版本生成：成功 {success_count}，失败 {fail_count}")
+                for version_name, result in self.version_generation_results.items():
+                    if not result.get("success"):
+                        self.logger.error(f"✗ {version_name}: {result.get('error')}")
             
-            # 报告并行生成结果
-            self.logger.info("\n=== 并行生成结果 ===")
-            for version_name, result in self.parallel_thread_results.items():
-                if result.get("success"):
-                    self.logger.info(f"✓ {version_name}: {result.get('path')}")
-                else:
-                    self.logger.error(f"✗ {version_name}: {result.get('error')}")
+            # 生成版本耗时TSV表格
+            self._generate_version_time_tsv()
         
         return {
-            "srs_document": final_state.get("_srs_document", ""),
             "requirements": final_state["requirements"],
             "comparison_report": comparison_report,
             "total_time": final_state["timer_manager"].get_total_time(),
             "timer_summary": final_state["timer_manager"].get_summary(),
-            "parallel_generation_results": self.parallel_thread_results if enable_parallel_generation else {}
+            "version_generation_results": self.version_generation_results
         }
+    
+    def _generate_version_time_tsv(self) -> None:
+        """生成版本耗时TSV表格并写入日志"""
+        if not self.version_generation_results:
+            return
+        
+        # 定义版本排序顺序
+        def sort_version_key(v):
+            if v == "no-explore-clarify":
+                return (0, 0)
+            elif v == "no-clarify":
+                return (0, 1)
+            elif v.startswith("iter"):
+                try:
+                    return (1, int(v.replace("iter", "")))
+                except:
+                    return (1, 0)
+            else:
+                return (2, 0)
+        
+        # 按版本生成顺序排序
+        sorted_versions = sorted(self.version_generation_results.keys(), key=sort_version_key)
+        
+        # 生成TSV表格
+        tsv_lines = []
+        tsv_lines.append("版本名称\t净耗时(秒)\t总耗时(秒)\t累计澄清耗时(秒)\t累计版本生成耗时(秒)\t版本生成耗时(秒)")
+        
+        for version_name in sorted_versions:
+            result = self.version_generation_results[version_name]
+            if result.get("success"):
+                net_time = result.get("net_time", 0.0)
+                total_time = result.get("total_time", 0.0)
+                cumulative_clarify_time = result.get("cumulative_clarify_time", 0.0)
+                cumulative_version_gen_time = result.get("cumulative_version_gen_time", 0.0)
+                version_gen_time = result.get("version_gen_time", 0.0)
+                
+                tsv_lines.append(
+                    f"{version_name}\t{net_time:.2f}\t{total_time:.2f}\t"
+                    f"{cumulative_clarify_time:.2f}\t{cumulative_version_gen_time:.2f}\t{version_gen_time:.2f}"
+                )
+            else:
+                # 失败版本标记
+                tsv_lines.append(f"{version_name}\t失败\t-\t-\t-\t-")
+        
+        # 写入日志
+        tsv_content = "\n".join(tsv_lines)
+        self.logger.info("\n=== 版本耗时统计 (TSV格式) ===\n" + tsv_content)

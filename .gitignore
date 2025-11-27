@@ -16,3 +16,6 @@ output/
 
 # Large data files
 *.tar
+eval_output
+test
+logs
