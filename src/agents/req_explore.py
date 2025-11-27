@@ -114,11 +114,16 @@ class ReqExploreAgent:
                         req_ids = sorted(score_groups.get(score, []))
                         
                         # 只显示有需求的分数情况
-                        if req_ids:
-                            score_message_lines.append(format_score_for_message(score))
-                            for req_id in req_ids:
-                                score_message_lines.append(f"- {req_id}")
-                            score_message_lines.append("")  # 添加空行分隔不同分数组
+                    if req_ids:
+                        score_message_lines.append(format_score_for_message(score))
+                        for req_id in req_ids:
+                            score_message_lines.append(f"- {req_id}")
+                        score_message_lines.append("")  # 添加空行分隔不同分数组
+
+                    # 补充评分含义和动作提示（不包含具体理由）
+                    score_message_lines.append("评分说明：2=完全符合保留且不再输出；1=基本符合可轻微润色；0=信息缺口需补全重写；-1/-2=冲突或缺失需重写")
+                    score_message_lines.append("处理动作：Score<=0 必须用相同ID重写；Score=1 可保持或微调；Score=2 保持不变且不要输出")
+                    score_message_lines.append("")
                     
                     # 添加任务说明（使用统一的处理方式说明）
                     score_message_lines.append("任务要求：")

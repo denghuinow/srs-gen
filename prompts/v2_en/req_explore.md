@@ -3,6 +3,12 @@ Complete two tasks based on the following information:
 1. **Improve Analyzed Requirements**: For requirements with scores <= 0, you must regenerate improved versions using the same ID
 2. **Supplement New Requirements**: Freely discover and supplement new requirements based on the customer's original requirements document, and must generate approximately {max_new_requirements_count} new requirements
 
+Score legend & required actions:
+- Score 2: fully compliant, keep text unchanged, DO NOT output again
+- Score 1: generally compliant, keep or lightly polish, same ID
+- Score 0: partial coverage/info gap, must rewrite with more coverage, same ID
+- Score -1/-2: deviation/conflict or missing baseline item, must redesign and rewrite, same ID
+
 **Customer's Original Requirements Document:**
 {raw_input}
 {baseline_requirement_structure}
@@ -56,4 +62,3 @@ When generating new requirements, you must pay special attention to the followin
 **Important: You only output new requirements (using new IDs) and requirements you want to improve (using original IDs). When generating new requirements, please ensure complete coverage of all content in the customer's original requirements document, and on this basis, discover and expand related requirements. Pay special attention to the four critical dimensions mentioned above.**
 
 **STRICTLY FORBIDDEN: Each requirement ID must appear only once in your entire output. Never repeat the same requirement ID. If a requirement ID has already been output, do not output it again.**
-
