@@ -394,7 +394,7 @@ def main():
         "--max-new-requirements-per-iteration",
         type=int,
         default=None,
-        help="每轮迭代新增需求数量（可选）"
+        help="每轮迭代需改进需求+新增需求的总数（可选）"
     )
     
     parser.add_argument(
@@ -742,9 +742,9 @@ def main():
         # 记录迭代配置信息
         f.write(f"最大迭代轮次：{max_iterations}\n")
         
-        # 记录每轮迭代新增需求数量
+        # 记录每轮迭代需改进需求+新增需求的总数
         max_new_req = args.max_new_requirements_per_iteration if args.max_new_requirements_per_iteration is not None else Config.NEW_REQUIREMENTS_PER_ITERATION
-        f.write(f"每轮迭代新增需求数量：{max_new_req}\n")
+        f.write(f"每轮迭代需改进需求+新增需求的总数：{max_new_req}\n")
         
         f.write(f"最大重试次数：{args.max_retries}\n")
         f.write(f"重试延迟：{args.retry_delay}秒\n")

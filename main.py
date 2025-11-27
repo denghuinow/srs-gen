@@ -67,7 +67,7 @@ def main():
         "--max-new-requirements-per-iteration",
         type=int,
         default=None,
-        help="每轮迭代新增需求数量（默认：从环境变量NEW_REQUIREMENTS_PER_ITERATION或配置中读取，默认值为10）"
+        help="每轮迭代需改进需求+新增需求的总数（默认：从环境变量NEW_REQUIREMENTS_PER_ITERATION或配置中读取，默认值为10）"
     )
     
     parser.add_argument(

@@ -57,7 +57,7 @@ Checkpoint 文件命名格式：`checkpoint_{node_name}_iter{iteration}.json`
 |--------|------|------|
 | `iteration_count` | int | 当前迭代计数 |
 | `max_iterations` | int | 最大迭代次数 |
-| `max_new_requirements_per_iteration` | int | 每次迭代最大新需求数量 |
+| `max_new_requirements_per_iteration` | int | 每次迭代需改进需求+新增需求的总数 |
 | `_cumulative_clarify_time` | float | 累计澄清时间（秒） |
 | `_cumulative_version_gen_time` | float | 累计版本生成时间（秒） |
 | `_workflow_start_time` | float | 工作流开始时间（Unix 时间戳） |

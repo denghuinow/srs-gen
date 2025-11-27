@@ -44,7 +44,7 @@ class ReqExploreAgent:
             existing_requirements: 现有需求清单
             iteration: 迭代轮次
             baseline_requirement_structure: 基准需求语义单元
-            max_new_requirements_per_iteration: 每轮迭代新增需求数量
+            max_new_requirements_per_iteration: 每轮迭代需改进需求+新增需求的总数
             messages: 对话历史（如果为None则初始化新的对话）
             clarification_results: 上一轮的评分结果（如果提供则作为用户消息追加）
         
@@ -65,16 +65,20 @@ class ReqExploreAgent:
             next_id = existing_requirements.get_next_id()
 
             # 使用参数指定的值，如果未指定则使用配置的默认值
-            new_req_count = max_new_requirements_per_iteration if max_new_requirements_per_iteration is not None else Config.NEW_REQUIREMENTS_PER_ITERATION
+            # max_total_req_count 表示每轮迭代需改进需求+新增需求的总数
+            max_total_req_count = max_new_requirements_per_iteration if max_new_requirements_per_iteration is not None else Config.NEW_REQUIREMENTS_PER_ITERATION
 
             self.logger.info(
-                f"需要生成新需求数量: {new_req_count} (来源: {'参数指定' if max_new_requirements_per_iteration is not None else f'配置值 NEW_REQUIREMENTS_PER_ITERATION={Config.NEW_REQUIREMENTS_PER_ITERATION}'})"
+                f"每轮迭代总数限制: {max_total_req_count} (来源: {'参数指定' if max_new_requirements_per_iteration is not None else f'配置值 NEW_REQUIREMENTS_PER_ITERATION={Config.NEW_REQUIREMENTS_PER_ITERATION}'})"
             )
 
             # 处理多轮对话逻辑
             if messages is None:
                 # 第一次调用：初始化新的对话
+                # 第一次调用时没有待改进需求，所以新增需求数 = 总数限制
+                new_req_count = max_total_req_count
                 self.logger.info("初始化新的对话（第一次调用）")
+                self.logger.info(f"待改进需求数: 0, 新增需求数: {new_req_count}")
                 # 使用提示词加载器加载并格式化提示词（不包含需求清单）
                 prompt = self.prompt_loader.format(
                     "req_explore",
@@ -105,6 +109,16 @@ class ReqExploreAgent:
                         if score <= 0
                     )
                     
+                    # 根据总数限制和待改进需求数，计算应该生成的新增需求数
+                    # 新增需求数 = max(0, 总数限制 - 待改进需求数)
+                    new_req_count = max(0, max_total_req_count - needs_improvement_count)
+                    
+                    self.logger.info(
+                        f"待改进需求数: {needs_improvement_count}, "
+                        f"总数限制: {max_total_req_count}, "
+                        f"新增需求数: {new_req_count}"
+                    )
+                    
                     # 按分数从高到低排序生成消息，包含所有分数情况
                     score_message_lines = []
                     score_message_lines.append("需求评分结果：")
@@ -131,12 +145,12 @@ class ReqExploreAgent:
                     for i, instruction in enumerate(instructions, 1):
                         score_message_lines.append(f"{i}. {instruction}")
                     
-                    # 如果待改进需求数超过max_new_requirements_per_iteration，则不要求生成新需求
-                    if needs_improvement_count < new_req_count:
+                    # 如果计算出的新增需求数 > 0，则要求生成新需求
+                    if new_req_count > 0:
                         score_message_lines.append(f"{len(instructions) + 1}. 在改进现有需求的同时，必须生成至少 {new_req_count} 个新增需求（从 {next_id} 开始）")
                     else:
                         self.logger.info(
-                            f"待改进需求数 ({needs_improvement_count}) >= 新需求数量要求 ({new_req_count})，"
+                            f"待改进需求数 ({needs_improvement_count}) >= 总数限制 ({max_total_req_count})，"
                             f"本次反馈不要求生成新需求，专注于改进现有需求"
                         )
                     
