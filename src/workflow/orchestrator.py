@@ -448,6 +448,32 @@ class WorkflowOrchestrator:
                 with open(srs_path, "w", encoding="utf-8") as f:
                     f.write(srs_document)
                 
+                # 构建requirements_text（与DocGenerateAgent.generate()内部逻辑完全一致）
+                if ablation_mode == "no-explore-clarify" and requirement_structure:
+                    requirements_text = requirement_structure
+                else:
+                    requirements_text = "\n\n".join(
+                        [f"**{req.id}**\n{req.text}" for req in requirements.requirements]
+                    )
+                
+                # 保存baseline_requirement_structure和requirements_text到req_collection目录
+                req_collection_dir = Path(output_dir_base) / "req_collection" / f"req_{version_name}"
+                req_collection_dir.mkdir(parents=True, exist_ok=True)
+                req_path = req_collection_dir / doc_name
+                
+                # 拼接两个内容，用分隔符区分
+                req_content = f"""=== baseline_requirement_structure ===
+
+{baseline_requirement_structure}
+
+=== requirements_text ===
+
+{requirements_text}
+"""
+                
+                with open(req_path, "w", encoding="utf-8") as f:
+                    f.write(req_content)
+                
                 # 计算净耗时
                 start_time = state.get("_workflow_start_time", 0.0)  # type: ignore
                 cumulative_clarify_time = state.get("_cumulative_clarify_time", 0.0)  # type: ignore
