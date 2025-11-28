@@ -2,8 +2,10 @@
 import re
 import copy
 import time
+import threading
 from pathlib import Path
 from typing import Literal, Optional, List
+from concurrent.futures import ThreadPoolExecutor, Future
 from langgraph.graph import StateGraph, END
 from openai import OpenAI
 from ..config import Config, AblationMode
@@ -16,7 +18,6 @@ from ..agents.doc_generate import DocGenerateAgent
 from ..utils.comparison import ComparisonReporter
 from ..utils.logger import get_logger
 from ..utils.token_counter import count_text_tokens
-from ..utils.checkpoint import CheckpointManager
 
 
 class WorkflowOrchestrator:
@@ -37,8 +38,10 @@ class WorkflowOrchestrator:
         # 版本生成结果管理
         self.version_generation_results: dict = {}  # 存储版本生成结果
         
-        # Checkpoint管理器（将在run中初始化）
-        self.checkpoint_manager: Optional[CheckpointManager] = None
+        # 文档生成线程池
+        self.doc_generate_executor: Optional[ThreadPoolExecutor] = None
+        self.doc_generate_futures: List[Future] = []  # 跟踪所有提交的任务
+        self._results_lock = threading.Lock()  # 保护 version_generation_results 的线程安全
     
     def _parse_node(self, state: WorkflowState) -> WorkflowState:
         """解析节点"""
@@ -62,10 +65,6 @@ class WorkflowOrchestrator:
         if gen_versions and "no-explore-clarify" in gen_versions:
             state["_version_to_generate"] = "no-explore-clarify"  # type: ignore
             state["_version_name"] = "no-explore-clarify"  # type: ignore
-        
-        # 保存checkpoint
-        if self.checkpoint_manager:
-            self.checkpoint_manager.save_checkpoint(state, "parse", state.get("iteration_count"))
         
         return state
     
@@ -124,10 +123,6 @@ class WorkflowOrchestrator:
         if gen_versions and "no-clarify" in gen_versions and state["iteration_count"] == 1:
             state["_version_to_generate"] = "no-clarify"  # type: ignore
             state["_version_name"] = "no-clarify"  # type: ignore
-        
-        # 保存checkpoint
-        if self.checkpoint_manager:
-            self.checkpoint_manager.save_checkpoint(state, "explore", state.get("iteration_count"))
         
         return state
 
@@ -299,10 +294,6 @@ class WorkflowOrchestrator:
             state["_version_to_generate"] = "iter"  # type: ignore
             state["_version_name"] = f"iter{iteration}"  # type: ignore
         
-        # 保存checkpoint
-        if self.checkpoint_manager:
-            self.checkpoint_manager.save_checkpoint(state, "clarify", state.get("iteration_count"))
-        
         return state
     
     def _route_after_parse(self, state: WorkflowState) -> Literal["generate_version", "explore"]:
@@ -374,15 +365,117 @@ class WorkflowOrchestrator:
         state["_last_generated_version"] = None  # type: ignore
         return "end"
     
-    def _generate_node(self, state: WorkflowState) -> WorkflowState:
-        """生成节点"""
-        agent = DocGenerateAgent(self.client, state["timer_manager"], prompt_version=self.prompt_version)
+    def _generate_document_async(
+        self,
+        version_name: str,
+        requirements: RequirementList,
+        raw_input: str,
+        requirement_structure: str,
+        baseline_requirement_structure: str,
+        ablation_mode: str,
+        output_dir_base: str,
+        task_name: str,
+        workflow_start_time: float,
+        cumulative_clarify_time: float,
+        cumulative_version_gen_time: float,
+        timer_manager
+    ) -> None:
+        """异步生成文档的函数（在线程池中执行）"""
+        version_gen_start_time = time.time()
         
+        try:
+            # 创建文档生成智能体
+            agent = DocGenerateAgent(self.client, timer_manager, prompt_version=self.prompt_version)
+            
+            # 生成SRS文档
+            srs_document = agent.generate(
+                requirements,
+                raw_input=raw_input,
+                requirement_structure=requirement_structure,
+                ablation_mode=ablation_mode,
+                baseline_requirement_structure=baseline_requirement_structure
+            )
+            
+            # 记录版本生成结束时间（文档生成完成）
+            version_gen_end_time = time.time()
+            version_gen_elapsed_time = version_gen_end_time - version_gen_start_time
+            
+            # 保存文件
+            output_dir = Path(output_dir_base) / f"srs_document_{version_name}"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            doc_name = f"{task_name}.md"
+            srs_path = output_dir / doc_name
+            
+            with open(srs_path, "w", encoding="utf-8") as f:
+                f.write(srs_document)
+            
+            # 构建requirements_text（与DocGenerateAgent.generate()内部逻辑完全一致）
+            if ablation_mode == "no-explore-clarify" and requirement_structure:
+                requirements_text = requirement_structure
+            else:
+                requirements_text = "\n\n".join(
+                    [f"**{req.id}**\n{req.text}" for req in requirements.requirements]
+                )
+            
+            # 保存baseline_requirement_structure和requirements_text到req_collection目录
+            # req_collection与srs_collection同级
+            req_collection_dir = Path(output_dir_base).parent / "req_collection" / f"req_{version_name}"
+            req_collection_dir.mkdir(parents=True, exist_ok=True)
+            req_path = req_collection_dir / doc_name
+            
+            # 拼接两个内容，用分隔符区分
+            req_content = f"""=== baseline_requirement_structure ===
+
+{baseline_requirement_structure}
+
+=== requirements_text ===
+
+{requirements_text}
+"""
+            
+            with open(req_path, "w", encoding="utf-8") as f:
+                f.write(req_content)
+            
+            # 计算净耗时
+            current_time = version_gen_end_time
+            total_time = current_time - workflow_start_time
+            net_time = total_time - cumulative_clarify_time - cumulative_version_gen_time
+            
+            # 线程安全地更新结果
+            with self._results_lock:
+                self.version_generation_results[version_name] = {
+                    "success": True,
+                    "path": str(srs_path),
+                    "content": srs_document,
+                    "net_time": net_time,
+                    "total_time": total_time,
+                    "cumulative_clarify_time": cumulative_clarify_time,
+                    "cumulative_version_gen_time": cumulative_version_gen_time,
+                    "version_gen_time": version_gen_elapsed_time
+                }
+            
+            self.logger.info(f"异步文档生成完成: {version_name}")
+            
+        except Exception as e:
+            self.logger.error(f"异步文档生成失败 ({version_name}): {e}", exc_info=True)
+            # 线程安全地更新失败结果
+            with self._results_lock:
+                self.version_generation_results[version_name] = {
+                    "success": False,
+                    "error": str(e)
+                }
+    
+    def _generate_node(self, state: WorkflowState) -> WorkflowState:
+        """生成节点（异步提交文档生成任务到线程池）"""
         version_to_generate = state.get("_version_to_generate")
         version_name = state.get("_version_name")
         
-        # 记录版本生成开始时间（仅计算文档生成时间，不包括文件I/O）
-        version_gen_start_time = time.time()
+        # 如果没有版本名称，直接返回
+        if not version_name:
+            state["_version_to_generate"] = None  # type: ignore
+            state["_version_name"] = None  # type: ignore
+            return state
         
         # 根据版本类型处理需求列表
         if version_to_generate == "no-explore-clarify":
@@ -417,97 +510,64 @@ class WorkflowOrchestrator:
                     requirements.requirements.append(req)
             ablation_mode = state.get("ablation_mode", "default")  # type: ignore
         
-        # 获取需求结构
+        # 获取需求结构和其他必要信息
         requirement_structure = state.get("requirement_structure", "")  # type: ignore
         baseline_requirement_structure = state.get("baseline_requirement_structure", "")  # type: ignore
+        output_dir_base = state.get("output_dir_base")
+        task_name = state.get("task_name", "srs_document")
+        workflow_start_time = state.get("_workflow_start_time", 0.0)  # type: ignore
+        cumulative_clarify_time = state.get("_cumulative_clarify_time", 0.0)  # type: ignore
+        cumulative_version_gen_time = state.get("_cumulative_version_gen_time", 0.0)  # type: ignore
         
-        # 生成SRS文档
-        srs_document = agent.generate(
+        # 如果输出目录未设置，无法异步生成，记录警告并返回
+        if not output_dir_base:
+            self.logger.warning(f"输出目录未设置，跳过文档生成: {version_name}")
+            state["_last_generated_version"] = version_name  # type: ignore
+            state["_version_to_generate"] = None  # type: ignore
+            state["_version_name"] = None  # type: ignore
+            return state
+        
+        # 确保线程池已初始化
+        if self.doc_generate_executor is None:
+            pool_size = Config.DOC_GENERATE_THREAD_POOL_SIZE
+            self.doc_generate_executor = ThreadPoolExecutor(max_workers=pool_size)
+            self.logger.info(f"初始化文档生成线程池，大小: {pool_size}")
+        
+        # 提交异步任务到线程池
+        self.logger.info(f"提交文档生成任务到线程池: {version_name}")
+        future = self.doc_generate_executor.submit(
+            self._generate_document_async,
+            version_name,
             requirements,
-            raw_input=state["raw_input"],
-            requirement_structure=requirement_structure,
-            ablation_mode=ablation_mode,
-            baseline_requirement_structure=baseline_requirement_structure
+            state["raw_input"],
+            requirement_structure,
+            baseline_requirement_structure,
+            ablation_mode,
+            output_dir_base,
+            task_name,
+            workflow_start_time,
+            cumulative_clarify_time,
+            cumulative_version_gen_time,
+            state["timer_manager"]
         )
         
-        # 记录版本生成结束时间（文档生成完成）
-        version_gen_end_time = time.time()
-        version_gen_elapsed_time = version_gen_end_time - version_gen_start_time
+        # 跟踪任务
+        self.doc_generate_futures.append(future)
         
-        # 如果指定了版本名称，保存到srs_collection目录并计算净耗时
-        if version_name:
-            output_dir_base = state.get("output_dir_base")
-            if output_dir_base:
-                output_dir = Path(output_dir_base) / f"srs_document_{version_name}"
-                output_dir.mkdir(parents=True, exist_ok=True)
-                
-                task_name = state.get("task_name", "srs_document")
-                doc_name = f"{task_name}.md"
-                srs_path = output_dir / doc_name
-                
-                with open(srs_path, "w", encoding="utf-8") as f:
-                    f.write(srs_document)
-                
-                # 构建requirements_text（与DocGenerateAgent.generate()内部逻辑完全一致）
-                if ablation_mode == "no-explore-clarify" and requirement_structure:
-                    requirements_text = requirement_structure
-                else:
-                    requirements_text = "\n\n".join(
-                        [f"**{req.id}**\n{req.text}" for req in requirements.requirements]
-                    )
-                
-                # 保存baseline_requirement_structure和requirements_text到req_collection目录
-                req_collection_dir = Path(output_dir_base) / "req_collection" / f"req_{version_name}"
-                req_collection_dir.mkdir(parents=True, exist_ok=True)
-                req_path = req_collection_dir / doc_name
-                
-                # 拼接两个内容，用分隔符区分
-                req_content = f"""=== baseline_requirement_structure ===
-
-{baseline_requirement_structure}
-
-=== requirements_text ===
-
-{requirements_text}
-"""
-                
-                with open(req_path, "w", encoding="utf-8") as f:
-                    f.write(req_content)
-                
-                # 计算净耗时
-                start_time = state.get("_workflow_start_time", 0.0)  # type: ignore
-                cumulative_clarify_time = state.get("_cumulative_clarify_time", 0.0)  # type: ignore
-                cumulative_version_gen_time = state.get("_cumulative_version_gen_time", 0.0)  # type: ignore
-                
-                current_time = version_gen_end_time
-                total_time = current_time - start_time
-                net_time = total_time - cumulative_clarify_time - cumulative_version_gen_time
-                
+        # 立即标记为pending状态（线程安全）
+        with self._results_lock:
+            if version_name not in self.version_generation_results:
                 self.version_generation_results[version_name] = {
-                    "success": True,
-                    "path": str(srs_path),
-                    "content": srs_document,
-                    "net_time": net_time,
-                    "total_time": total_time,
-                    "cumulative_clarify_time": cumulative_clarify_time,
-                    "cumulative_version_gen_time": cumulative_version_gen_time,
-                    "version_gen_time": version_gen_elapsed_time
+                    "success": None,  # None表示pending
+                    "status": "pending"
                 }
-                
-                # 累计版本生成耗时
-                state["_cumulative_version_gen_time"] = cumulative_version_gen_time + version_gen_elapsed_time  # type: ignore
         
         # 保存最后生成的版本名称，供路由函数使用
-        if version_name:
-            state["_last_generated_version"] = version_name  # type: ignore
+        state["_last_generated_version"] = version_name  # type: ignore
         
         # 清除版本生成标记
         state["_version_to_generate"] = None  # type: ignore
         state["_version_name"] = None  # type: ignore
-        
-        # 保存checkpoint
-        if self.checkpoint_manager:
-            self.checkpoint_manager.save_checkpoint(state, "generate", state.get("iteration_count"))
         
         return state
     
@@ -574,10 +634,7 @@ class WorkflowOrchestrator:
         max_new_requirements_per_iteration: Optional[int] = None,
         output_dir_base: Optional[str] = None,
         task_name: Optional[str] = None,
-        gen_versions: Optional[set] = None,
-        resume_from_checkpoint: Optional[str] = None,
-        auto_resume: bool = True,
-        checkpoint_dir: Optional[str] = None
+        gen_versions: Optional[set] = None
     ) -> dict:
         """运行工作流"""
         from ..utils.timer import TimerManager
@@ -586,75 +643,43 @@ class WorkflowOrchestrator:
         
         self.ablation_mode = ablation_mode
         
-        # 初始化checkpoint管理器
-        # checkpoint保存在任务自己的输出目录，而不是共享的srs_collection目录
-        # 这样可以避免并行任务之间的checkpoint冲突
-        if checkpoint_dir:
-            self.checkpoint_manager = CheckpointManager(checkpoint_dir)
-        else:
-            self.checkpoint_manager = None
+        # 初始化线程池（如果还没有初始化）
+        if self.doc_generate_executor is None:
+            pool_size = Config.DOC_GENERATE_THREAD_POOL_SIZE
+            self.doc_generate_executor = ThreadPoolExecutor(max_workers=pool_size)
+            self.logger.info(f"初始化文档生成线程池，大小: {pool_size}")
         
-        # 尝试从checkpoint恢复
-        initial_state: Optional[WorkflowState] = None
-        if resume_from_checkpoint:
-            # 手动指定checkpoint路径
-            checkpoint_path = Path(resume_from_checkpoint)
-            if checkpoint_path.exists():
-                initial_state = self.checkpoint_manager.load_checkpoint(checkpoint_path) if self.checkpoint_manager else None
-                if initial_state:
-                    self.logger.info(f"从指定checkpoint恢复: {checkpoint_path}")
-        elif auto_resume and self.checkpoint_manager:
-            # 自动查找最新checkpoint
-            initial_state = self.checkpoint_manager.load_checkpoint()
-            if initial_state:
-                self.logger.info("从最新checkpoint自动恢复")
+        # 创建新状态
+        initial_state = {
+            "raw_input": raw_input,
+            "baseline_srs": baseline_srs,
+            "baseline_gend_srs": baseline_gend_srs,
+            "requirements": RequirementList(),
+            "score_history": ScoreHistory(),
+            "timer_manager": TimerManager(),
+            "iteration_count": 1,  # 迭代从1开始
+            "ablation_mode": ablation_mode,
+            "convergence_reached": False,
+            "max_iterations": max_iterations,  # type: ignore
+            "max_new_requirements_per_iteration": max_new_requirements_per_iteration,  # type: ignore
+            "req_explore_messages": None,  # type: ignore
+            "clarification_results": None,  # type: ignore
+            "output_dir_base": output_dir_base,  # type: ignore
+            "task_name": task_name,  # type: ignore
+            "gen_versions": gen_versions,  # type: ignore
+            "_version_to_generate": None,  # type: ignore
+            "_version_name": None,  # type: ignore
+            "_last_generated_version": None,  # type: ignore
+            "_cumulative_clarify_time": 0.0,  # type: ignore
+            "_cumulative_version_gen_time": 0.0  # type: ignore
+        }
         
-        # 如果没有从checkpoint恢复，创建新状态
-        if initial_state is None:
-            initial_state = {
-                "raw_input": raw_input,
-                "baseline_srs": baseline_srs,
-                "baseline_gend_srs": baseline_gend_srs,
-                "requirements": RequirementList(),
-                "score_history": ScoreHistory(),
-                "timer_manager": TimerManager(),
-                "iteration_count": 1,  # 迭代从1开始
-                "ablation_mode": ablation_mode,
-                "convergence_reached": False,
-                "max_iterations": max_iterations,  # type: ignore
-                "max_new_requirements_per_iteration": max_new_requirements_per_iteration,  # type: ignore
-                "req_explore_messages": None,  # type: ignore
-                "clarification_results": None,  # type: ignore
-                "output_dir_base": output_dir_base,  # type: ignore
-                "task_name": task_name,  # type: ignore
-                "gen_versions": gen_versions,  # type: ignore
-                "_version_to_generate": None,  # type: ignore
-                "_version_name": None,  # type: ignore
-                "_last_generated_version": None,  # type: ignore
-                "_cumulative_clarify_time": 0.0,  # type: ignore
-                "_cumulative_version_gen_time": 0.0  # type: ignore
-            }
-            
-            # 开始计时并保存开始时间
-            initial_state["timer_manager"].start_total()
-            workflow_start_time = initial_state["timer_manager"].total_start_time
-            if workflow_start_time is None:
-                workflow_start_time = time.time()
-            initial_state["_workflow_start_time"] = workflow_start_time  # type: ignore
-        else:
-            # 从checkpoint恢复，确保关键字段存在
-            if "output_dir_base" not in initial_state:
-                initial_state["output_dir_base"] = output_dir_base  # type: ignore
-            if "task_name" not in initial_state:
-                initial_state["task_name"] = task_name  # type: ignore
-            if "gen_versions" not in initial_state:
-                initial_state["gen_versions"] = gen_versions  # type: ignore
-            # 确保timer_manager已初始化
-            if "timer_manager" not in initial_state or initial_state["timer_manager"] is None:
-                initial_state["timer_manager"] = TimerManager()
-                initial_state["timer_manager"].start_total()
-                if "_workflow_start_time" not in initial_state:
-                    initial_state["_workflow_start_time"] = time.time()  # type: ignore
+        # 开始计时并保存开始时间
+        initial_state["timer_manager"].start_total()
+        workflow_start_time = initial_state["timer_manager"].total_start_time
+        if workflow_start_time is None:
+            workflow_start_time = time.time()
+        initial_state["_workflow_start_time"] = workflow_start_time  # type: ignore
         
         # 构建并运行工作流
         graph = self.build_graph()
@@ -668,6 +693,22 @@ class WorkflowOrchestrator:
         # 停止计时
         final_state["timer_manager"].get_total_time()
         
+        # 等待所有异步文档生成任务完成
+        if self.doc_generate_executor and self.doc_generate_futures:
+            self.logger.info(f"等待 {len(self.doc_generate_futures)} 个文档生成任务完成...")
+            for future in self.doc_generate_futures:
+                try:
+                    future.result()  # 等待任务完成，如果有异常会抛出
+                except Exception as e:
+                    self.logger.error(f"文档生成任务执行异常: {e}", exc_info=True)
+            
+            # 关闭线程池（等待所有任务完成）
+            self.logger.info("关闭文档生成线程池...")
+            self.doc_generate_executor.shutdown(wait=True)
+            self.doc_generate_executor = None
+            self.doc_generate_futures.clear()
+            self.logger.info("文档生成线程池已关闭")
+        
         # 生成对比报告
         reporter = ComparisonReporter()
         comparison_report = reporter.generate_report(
@@ -679,16 +720,24 @@ class WorkflowOrchestrator:
         
         # 报告版本生成结果
         if self.version_generation_results:
-            success_count = sum(1 for r in self.version_generation_results.values() if r.get("success"))
-            fail_count = len(self.version_generation_results) - success_count
-            if fail_count > 0:
+            success_count = sum(1 for r in self.version_generation_results.values() if r.get("success") is True)
+            fail_count = sum(1 for r in self.version_generation_results.values() if r.get("success") is False)
+            pending_count = sum(1 for r in self.version_generation_results.values() if r.get("success") is None)
+            
+            if pending_count > 0:
+                self.logger.warning(f"版本生成：成功 {success_count}，失败 {fail_count}，待处理 {pending_count}")
+            elif fail_count > 0:
                 self.logger.warning(f"版本生成：成功 {success_count}，失败 {fail_count}")
                 for version_name, result in self.version_generation_results.items():
-                    if not result.get("success"):
+                    if result.get("success") is False:
                         self.logger.error(f"✗ {version_name}: {result.get('error')}")
             
             # 生成版本耗时TSV表格
-            self._generate_version_time_tsv()
+            self._generate_version_time_tsv(output_dir=None)
+        
+        # 关闭日志系统，确保所有异步任务的日志都被写入
+        from ..utils.logger import Logger
+        Logger.shutdown()
         
         return {
             "requirements": final_state["requirements"],
@@ -698,8 +747,8 @@ class WorkflowOrchestrator:
             "version_generation_results": self.version_generation_results
         }
     
-    def _generate_version_time_tsv(self) -> None:
-        """生成版本耗时TSV表格并写入日志"""
+    def _generate_version_time_tsv(self, output_dir: Optional[Path] = None) -> None:
+        """生成版本耗时TSV表格并写入日志，可选保存为TSV文件"""
         if not self.version_generation_results:
             return
         
@@ -744,3 +793,18 @@ class WorkflowOrchestrator:
         # 写入日志
         tsv_content = "\n".join(tsv_lines)
         self.logger.info("\n=== 版本耗时统计 (TSV格式) ===\n" + tsv_content)
+        
+        # 如果提供了输出目录，保存为TSV文件
+        if output_dir is not None:
+            try:
+                # 确保输出目录存在
+                output_dir.mkdir(parents=True, exist_ok=True)
+                
+                # 保存TSV文件
+                tsv_file_path = output_dir / "srs_version_gen_time.tsv"
+                with open(tsv_file_path, "w", encoding="utf-8") as f:
+                    f.write(tsv_content)
+                
+                self.logger.info(f"版本耗时统计已保存到: {tsv_file_path}")
+            except Exception as e:
+                self.logger.warning(f"保存版本耗时TSV文件失败: {e}")

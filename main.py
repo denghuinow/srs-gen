@@ -2,10 +2,12 @@
 import argparse
 import shutil
 import sys
+import time
 from pathlib import Path
 from src.workflow.orchestrator import WorkflowOrchestrator
 from src.config import Config, AblationMode
 from src.utils.logger import Logger, get_logger
+from src.models.requirement import RequirementList
 
 
 def load_file(file_path: str) -> str:
@@ -84,27 +86,6 @@ def main():
         help="指定需要生成的版本：no-explore-clarify、no-clarify、数字（迭代次数）。必须至少指定一个数字版本。例如：--gen no-explore-clarify no-clarify 2 4 6"
     )
     
-    parser.add_argument(
-        "--resume-from-checkpoint",
-        type=str,
-        default=None,
-        help="从指定的checkpoint文件恢复执行（checkpoint文件路径）"
-    )
-    
-    parser.add_argument(
-        "--auto-resume",
-        action="store_true",
-        default=True,
-        help="自动从最新checkpoint恢复（默认：启用）"
-    )
-    
-    parser.add_argument(
-        "--no-auto-resume",
-        dest="auto_resume",
-        action="store_false",
-        help="禁用自动从checkpoint恢复"
-    )
-    
     args = parser.parse_args()
     
     # 解析--gen参数
@@ -176,24 +157,25 @@ def main():
     sorted_versions = sort_gen_versions(gen_versions)
     logger.info(f"开始运行SRS编制系统（模式：{args.ablation_mode}，版本：{sorted_versions}，最大迭代：{max_iterations}）")
     
+    # srs_collection目录在output_dir的父目录下
+    srs_collection_dir = output_dir.parent / "srs_collection"
+    srs_collection_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 从输入文件路径提取任务名
+    input_path = Path(args.input)
+    if input_path.exists():
+        task_name = input_path.stem
+    else:
+        # 如果输入是文本，使用output_dir的名称作为任务名
+        task_name = output_dir.name
+    
+    # 运行工作流
     orchestrator = WorkflowOrchestrator(
         ablation_mode=args.ablation_mode,  # type: ignore
         prompt_version=args.prompt_version
     )
     
     try:
-        # srs_collection目录在output_dir的父目录下
-        srs_collection_dir = output_dir.parent / "srs_collection"
-        srs_collection_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 从输入文件路径提取任务名
-        input_path = Path(args.input)
-        if input_path.exists():
-            task_name = input_path.stem
-        else:
-            # 如果输入是文本，使用output_dir的名称作为任务名
-            task_name = output_dir.name
-        
         result = orchestrator.run(
             raw_input=raw_input,
             max_iterations=max_iterations,
@@ -203,11 +185,13 @@ def main():
             max_new_requirements_per_iteration=args.max_new_requirements_per_iteration,
             output_dir_base=str(srs_collection_dir),
             task_name=task_name,
-            gen_versions=gen_versions,
-            resume_from_checkpoint=args.resume_from_checkpoint,
-            auto_resume=args.auto_resume,
-            checkpoint_dir=str(output_dir)  # checkpoint保存在任务自己的输出目录，而不是共享目录
+            gen_versions=gen_versions
         )
+    except Exception as e:
+        logger.error(f"工作流执行失败：{e}", exc_info=True)
+        raise
+    
+    try:
         
         # 保存对比报告
         report_path = output_dir / "comparison_report.md"

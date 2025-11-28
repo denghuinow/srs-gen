@@ -27,6 +27,15 @@ SCORE_DESCRIPTIONS = {
     -2: f"{SCORE_MEANINGS[-2]} - {SCORE_ACTIONS[-2]}"
 }
 
+# 评分英文描述（用于消息输出）
+SCORE_DESCRIPTIONS_EN = {
+    2: "Fully compliant - Keep unchanged, do not output again",
+    1: "Generally compliant - Keep or optimize with same ID",
+    0: "Partial coverage - Rewrite with more coverage, same ID",
+    -1: "Deviation - Redesign and rewrite, same ID",
+    -2: "Conflict - Redesign and rewrite, same ID"
+}
+
 # 有效的评分范围
 VALID_SCORES = [-2, -1, 0, 1, 2]
 
@@ -83,16 +92,16 @@ def format_score_for_log(score: int) -> str:
 
 
 def format_score_for_message(score: int) -> str:
-    """格式化评分用于消息输出"""
-    description = get_score_description(score)
+    """格式化评分用于消息输出（使用英文）"""
+    description = SCORE_DESCRIPTIONS_EN.get(score, "Unknown")
     return f"Score: {score} ({description})"
 
 
 def get_processing_instructions() -> list[str]:
     """获取处理方式说明列表"""
     return [
-        f"对于 Score <= 0 的需求（部分符合、存在偏差或明显冲突），必须重新生成改进版本，使用相同的ID",
-        f"对于 Score = 1 的需求（基本符合），可以保持不变或轻微优化，使用相同的ID",
-        f"对于 Score = 2 的需求（完全符合），保持不变，不需要再次输出"
+        "For requirements with Score <= 0 (partial coverage, deviation, or conflict), you must regenerate improved versions using the same ID",
+        "For requirements with Score = 1 (generally compliant), you can keep them unchanged or make minor optimizations using the same ID",
+        "For requirements with Score = 2 (fully compliant), keep them unchanged and do not output them again"
     ]
 

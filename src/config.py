@@ -43,6 +43,9 @@ class Config:
     # 提示词版本配置
     PROMPT_VERSION: str = os.getenv("PROMPT_VERSION", "v1")  # 提示词版本，默认为v1
     
+    # 文档生成线程池配置
+    DOC_GENERATE_THREAD_POOL_SIZE: int = int(os.getenv("DOC_GENERATE_THREAD_POOL_SIZE", "5"))  # 文档生成线程池大小，默认为5
+    
     # 最大上下文长度配置
     @classmethod
     def get_max_context_length(cls) -> Optional[int]:

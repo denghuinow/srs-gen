@@ -1,5 +1,6 @@
 """需求挖掘智能体 (FR-002)"""
 
+import re
 from typing import Optional, Tuple, List
 from openai import OpenAI
 from ..config import Config
@@ -11,8 +12,7 @@ from ..utils.prompt_loader import PromptLoader
 from ..utils.token_counter import count_text_tokens
 from ..utils.score_definitions import (
     VALID_SCORES,
-    format_score_for_message,
-    get_processing_instructions
+    format_score_for_message
 )
 
 
@@ -119,42 +119,64 @@ class ReqExploreAgent:
                         f"新增需求数: {new_req_count}"
                     )
                     
-                    # 按分数从高到低排序生成消息，包含所有分数情况
-                    score_message_lines = []
-                    score_message_lines.append("需求评分结果：")
-                    score_message_lines.append("")
+                    # 从提示词文件加载评分消息模板
+                    try:
+                        score_template = self.prompt_loader.load("score_message_template")
+                        # 移除评分描述部分（如果有），只保留模板主体
+                        parts = re.split(r'^---\s*$', score_template, flags=re.MULTILINE)
+                        score_template = parts[0].strip() if parts else score_template
+                    except FileNotFoundError:
+                        self.logger.warning("评分消息模板文件不存在，使用默认格式")
+                        score_template = None
                     
+                    # 构建评分分组内容（只显示分数和需求ID，不显示描述）
+                    # 格式：Score: X 后跟逗号分隔的需求ID列表
+                    score_groups_lines = []
                     for score in sorted(VALID_SCORES, reverse=True):
                         req_ids = sorted(score_groups.get(score, []))
                         
                         # 只显示有需求的分数情况
-                    if req_ids:
-                        score_message_lines.append(format_score_for_message(score))
-                        for req_id in req_ids:
-                            score_message_lines.append(f"- {req_id}")
-                        score_message_lines.append("")  # 添加空行分隔不同分数组
-
-                    # 补充评分含义和动作提示（不包含具体理由）
-                    score_message_lines.append("评分说明：2=完全符合保留且不再输出；1=基本符合可轻微润色；0=信息缺口需补全重写；-1/-2=冲突或缺失需重写")
-                    score_message_lines.append("处理动作：Score<=0 必须用相同ID重写；Score=1 可保持或微调；Score=2 保持不变且不要输出")
-                    score_message_lines.append("")
+                        if req_ids:
+                            # 使用逗号分隔的需求ID列表
+                            req_ids_str = ", ".join(req_ids)
+                            score_groups_lines.append(f"Score: {score}")
+                            score_groups_lines.append(req_ids_str)
+                            score_groups_lines.append("")  # 添加空行分隔不同分数组
+                    score_groups_text = "\n".join(score_groups_lines).strip()
                     
-                    # 添加任务说明（使用统一的处理方式说明）
-                    score_message_lines.append("任务要求：")
-                    instructions = get_processing_instructions()
-                    for i, instruction in enumerate(instructions, 1):
-                        score_message_lines.append(f"{i}. {instruction}")
-                    
-                    # 如果计算出的新增需求数 > 0，则要求生成新需求
+                    # 构建新增需求指令（动态部分）
                     if new_req_count > 0:
-                        score_message_lines.append(f"{len(instructions) + 1}. 在改进现有需求的同时，必须生成至少 {new_req_count} 个新增需求（从 {next_id} 开始）")
+                        new_requirements_instruction = f"4. While improving existing requirements, you must generate at least {new_req_count} new requirements (starting from {next_id})"
                     else:
                         self.logger.info(
                             f"待改进需求数 ({needs_improvement_count}) >= 总数限制 ({max_total_req_count})，"
                             f"本次反馈不要求生成新需求，专注于改进现有需求"
                         )
+                        new_requirements_instruction = ""
                     
-                    score_message = "\n".join(score_message_lines).strip()
+                    # 使用模板填充数据
+                    if score_template:
+                        score_message = score_template.format(
+                            score_groups=score_groups_text,
+                            new_requirements_instruction=new_requirements_instruction
+                        )
+                    else:
+                        # 回退到原来的硬编码方式
+                        score_message_lines = []
+                        score_message_lines.append("Requirement Scoring Results:")
+                        score_message_lines.append("")
+                        score_message_lines.append(score_groups_text)
+                        score_message_lines.append("")
+                        score_message_lines.append("Score Legend: 2=Fully compliant, keep unchanged; 1=Generally compliant, keep or polish; 0=Partial coverage, rewrite; -1/-2=Deviation/conflict, redesign and rewrite")
+                        score_message_lines.append("Action Required: Score<=0 must rewrite with same ID; Score=1 can keep or optimize with same ID; Score=2 keep unchanged and do not output again")
+                        score_message_lines.append("")
+                        score_message_lines.append("Task Requirements:")
+                        score_message_lines.append("1. For requirements with Score <= 0 (partial coverage, deviation, or conflict), you must regenerate improved versions using the same ID")
+                        score_message_lines.append("2. For requirements with Score = 1 (generally compliant), you can keep them unchanged or make minor optimizations using the same ID")
+                        score_message_lines.append("3. For requirements with Score = 2 (fully compliant), keep them unchanged and do not output them again")
+                        if new_requirements_instruction:
+                            score_message_lines.append(new_requirements_instruction)
+                        score_message = "\n".join(score_message_lines).strip()
                     messages.append({"role": "user", "content": score_message})
                     self.logger.info(f"追加评分结果消息，包含 {len(clarification_results)} 个需求的评分")
                     self.logger.debug(f"评分消息内容:\n{score_message}")

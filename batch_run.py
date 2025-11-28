@@ -127,21 +127,6 @@ def is_task_completed(output_dir: Path, gen_versions: List) -> bool:
     return True
 
 
-def get_latest_checkpoint(output_dir: Path) -> Optional[Path]:
-    """获取最新的checkpoint文件"""
-    checkpoint_dir = output_dir / "checkpoints"
-    if not checkpoint_dir.exists():
-        return None
-    
-    checkpoints = list(checkpoint_dir.glob("checkpoint_*.json"))
-    if not checkpoints:
-        return None
-    
-    # 按修改时间排序，返回最新的
-    checkpoints.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return checkpoints[0]
-
-
 def run_single_task(
     input_file: Path,
     baseline_file: Optional[Path],
@@ -153,8 +138,7 @@ def run_single_task(
     gen_versions: List,
     max_retries: int = 3,
     retry_delay: float = 5.0,
-    skip_existing: bool = False,
-    auto_resume: bool = True
+    skip_existing: bool = False
 ) -> Tuple[str, bool, str]:
     """执行单个任务，带重试机制"""
     task_name = input_file.stem
@@ -192,22 +176,8 @@ def run_single_task(
     # 执行命令，带重试
     start_time = time.time()
     last_error = None
-    checkpoint_used = False
     
     for attempt in range(max_retries + 1):  # 0到max_retries，共max_retries+1次尝试
-        # 如果失败且启用自动恢复，尝试从checkpoint恢复
-        if attempt > 0 and auto_resume:
-            latest_checkpoint = get_latest_checkpoint(output_dir)
-            if latest_checkpoint:
-                # 添加--resume-from-checkpoint参数
-                checkpoint_cmd = cmd.copy()
-                # 移除可能已存在的--resume-from-checkpoint参数
-                checkpoint_cmd = [arg for arg in checkpoint_cmd if not arg.startswith("--resume-from-checkpoint")]
-                checkpoint_cmd.extend(["--resume-from-checkpoint", str(latest_checkpoint)])
-                cmd = checkpoint_cmd
-                checkpoint_used = True
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] {task_name}: 从checkpoint恢复: {latest_checkpoint.name}")
-        
         try:
             result = subprocess.run(
                 cmd,
@@ -247,8 +217,7 @@ def run_single_task(
                 version_info = ""
             
             if attempt > 0:
-                resume_info = " (从checkpoint恢复)" if checkpoint_used else ""
-                return (task_name, True, f"成功 (耗时: {elapsed_time:.2f}秒, 重试: {attempt}次){resume_info}{version_info}")
+                return (task_name, True, f"成功 (耗时: {elapsed_time:.2f}秒, 重试: {attempt}次){version_info}")
             return (task_name, True, f"成功 (耗时: {elapsed_time:.2f}秒){version_info}")
         except subprocess.CalledProcessError as e:
             elapsed_time = time.time() - start_time
@@ -448,20 +417,6 @@ def main():
     )
     
     parser.add_argument(
-        "--auto-resume",
-        action="store_true",
-        default=True,
-        help="自动从checkpoint恢复失败的任务（默认：启用）"
-    )
-    
-    parser.add_argument(
-        "--no-auto-resume",
-        dest="auto_resume",
-        action="store_false",
-        help="禁用自动从checkpoint恢复失败的任务"
-    )
-    
-    parser.add_argument(
         "--startup-delay",
         type=float,
         default=0.0,
@@ -621,8 +576,7 @@ def main():
                 gen_versions_list,
                 args.max_retries,
                 args.retry_delay,
-                args.skip_existing,
-                args.auto_resume
+                args.skip_existing
             )
             # 添加输入文件信息到结果
             results.append((result[0], result[1], result[2], input_file))
@@ -669,8 +623,7 @@ def main():
                     gen_versions_list,
                     args.max_retries,
                     args.retry_delay,
-                    args.skip_existing,
-                    args.auto_resume
+                    args.skip_existing
                 )
                 future_to_task[future] = (task_name, baseline_file, baseline_gend_file, input_file)
                 submitted_count += 1
